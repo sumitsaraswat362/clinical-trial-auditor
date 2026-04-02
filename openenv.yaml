@@ -1,0 +1,27 @@
+name: clinical_trial_auditor
+version: "2.0.0"
+description: >
+  A production-grade Reinforcement Learning environment for medical AI alignment.
+  The agent acts as a Senior Clinical Data Manager, utilizing a strict multi-phase 
+  workflow (Investigation → Flagging → Reporting) to identify syntactic errors, 
+  temporal violations, and multi-dimensional intersectional bias in trial datasets.
+author: Sumit Saraswat
+tags:
+  - openenv
+  - clinical
+  - rl-benchmark
+  - medical-bias
+  - ai-safety
+tasks:
+  - id: task_easy
+    name: Syntactic Cleaning
+    difficulty: easy
+    description: Investigate dataset distribution and flag patients with invalid age values (out of 18-120 range or null).
+  - id: task_medium
+    name: Temporal Consistency
+    difficulty: medium
+    description: Investigate temporal variables and flag patients where death_date precedes treatment_start.
+  - id: task_hard
+    name: Equity Bias Audit
+    difficulty: hard
+    description: Perform multi-dimensional statistical analysis to detect intersectional selection bias affecting minority control group outcomes.

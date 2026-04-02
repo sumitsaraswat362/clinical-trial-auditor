@@ -1,0 +1,6 @@
+EASY: 300 patients
+Age errors: 12
+Phase: flagging
+Flag: ✓ Correct: P0037 has invalid age (999). Good catch.
+HARD: 800 patients, bias: True
+DONE

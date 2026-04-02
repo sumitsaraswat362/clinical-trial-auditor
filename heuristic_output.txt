@@ -1,0 +1,45 @@
+=================================================================
+  Clinical Trial Auditor — Baseline Inference
+  Procedural Dataset Generation | Adversarial Traps | Seed-Reproducible
+  Model: llama-3.3-70b-versatile
+  Seed: 20240401
+=================================================================
+
+═════════════════════════════════════════════════════════════════
+  AGENT: HEURISTIC
+═════════════════════════════════════════════════════════════════
+
+  Task: Syntactic Cleaning (Easy)
+  --------------------------------------------------
+  Patients: 300 | Max steps: 20
+  📊 Metrics: 12/12 correct (precision=100%) | 16 steps | 0 LLM call(s)
+  ✓ Final: 1.00
+
+
+  Task: Temporal Consistency (Medium)
+  --------------------------------------------------
+  Patients: 500 | Max steps: 30
+  📊 Metrics: 25/26 correct (precision=96%) | 30 steps | 0 LLM call(s)
+  ✓ Final: 0.94
+
+
+  Task: Equity Bias Audit (Hard)
+  --------------------------------------------------
+  Patients: 800 | Max steps: 40
+  📊 Metrics: 34/36 correct (precision=94%) | 40 steps | 0 LLM call(s)
+  ✓ Final: 1.00
+
+
+=================================================================
+  BENCHMARK RESULTS
+=================================================================
+    Syntactic Cleaning (Easy)          : 1.00
+    Temporal Consistency (Medium)      : 0.94
+    Equity Bias Audit (Hard)           : 1.00
+
+    Average score:     0.98
+    Total time:        0.4s
+    LLM calls:         0
+    Total steps:       86
+    Average precision: 97%
+=================================================================
