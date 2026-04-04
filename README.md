@@ -1,3 +1,16 @@
+---
+title: Clinical Trial Auditor
+emoji: 🏥
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+pinned: false
+tags:
+  - openenv
+---
+
+
 # Clinical Trial Auditor (OpenEnv)
 
 Clinical Trial Auditor is a protocol-aware OpenEnv benchmark for clinical data auditing. The agent acts as a Senior Clinical Data Manager reviewing procedurally generated Phase III oncology trial data under dynamic per-episode rules.
