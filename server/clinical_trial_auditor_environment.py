@@ -1,151 +1,101 @@
 """
 Clinical Trial Auditor — OpenEnv Environment
-=============================================
-A production-grade adversarial RL environment for medical AI alignment
-and clinical data quality evaluation.
-
-The agent acts as a Senior Clinical Data Manager auditing procedurally
-generated clinical trial datasets from a multi-site Phase III oncology trial.
-
-Architecture layers:
-  ┌─────────────────────────────────────────────┐
-  │       Agent Interface (OpenEnv API)         │
-  │      step() / reset() / state()             │
-  ├─────────────────────────────────────────────┤
-  │        Scoring Engine (Grader)              │
-  │  Ground-truth comparison, partial credit,   │
-  │  confidence calibration, score composition  │
-  ├─────────────────────────────────────────────┤
-  │       Trap Engine (Adversarial)             │
-  │  Boundary traps, temporal traps, fake       │
-  │  bias patterns, distractor injection        │
-  ├─────────────────────────────────────────────┤
-  │       Data Engine (Generator)               │
-  │  Statistical distributions, demographics,   │
-  │  reproducible seeds, configurable params    │
-  └─────────────────────────────────────────────┘
-
-Key design decisions:
-  - Procedural generation: every reset() → unique dataset → no memorization
-  - Ground-truth grading: errors are pre-computed, grading is O(1) lookup
-  - Confidence-calibrated scoring: overconfident + wrong = devastating penalty
-  - False positive cost 3× correct reward → forces precision over recall
-  - Adversarial traps: boundary-valid ages, near-temporal cases, fake patterns
-  - Multi-phase workflow: Investigation → Flagging → Reporting
-  - Seed-based reproducibility for deterministic evaluation
+============================================
+Protocol-aware clinical audit benchmark with dynamic rules, adversarial traps,
+and stage-aware fairness evaluation.
 """
+
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
-from openenv.core.env_server import Environment
-from models import AuditAction, AuditObservation, AuditState
-from dataset_generator import DatasetGenerator
 
-# ── Reward Configuration ──────────────────────────────────────────────────
-# Calibrated: optimal play → ~0.85-0.95, careless play → devastated
-# Key design: false_positive = 3× correct_flag → DESTROYS guessing strategies
+from openenv.core.env_server import Environment
+
+try:
+    from .dataset_generator import DatasetGenerator
+    from .models import AuditAction, AuditObservation, AuditState
+except ImportError:
+    from dataset_generator import DatasetGenerator
+    from models import AuditAction, AuditObservation, AuditState
+
+
 REWARD_CONFIG = {
-    "correct_flag": 0.10,            # +0.10 per correct error flag
-    "false_positive": -0.30,         # -0.30 per wrong flag (3x correct → destroys guessing)
-    "duplicate_flag": -0.10,         # -0.10 per duplicate flag
-    "investigate_new": 0.05,         # +0.05 for investigating a new variable
-    "investigate_redundant": -0.02,  # -0.02 for re-investigating (penalizes loops)
-    "distribution_new": 0.04,        # +0.04 for computing new distribution
+    "correct_flag": 0.16,
+    "false_positive": -0.26,
+    "duplicate_flag": -0.08,
+    "investigate_new": 0.04,
+    "investigate_redundant": -0.02,
+    "distribution_new": 0.04,
     "distribution_redundant": -0.02,
-    "invalid_phase": -0.05,          # -0.05 for acting in wrong phase
-    "unknown_action": -0.05,         # -0.05 for invalid action types
-    "cost_per_step": 0.005,          # -0.005 per step (encourages efficiency)
-    "bonus_efficiency": 0.03,        # +0.03 when ≥3 investigated AND ≥3 flagged
-    "bonus_workflow": 0.03,          # +0.03 for correct workflow sequence
-    "bias_detected": 0.20,           # +0.20 for correctly identifying selection bias
-    "propose_fix_valid": 0.03,
-    "propose_fix_invalid": -0.05,
-    "report_bonus_base": 0.05,       # +0.05 base for submitting report
-    "overconfidence_multiplier": 2.0, # 2x penalty when wrong + confidence > 0.8
+    "invalid_phase": -0.06,
+    "unknown_action": -0.05,
+    "cost_per_step": 0.004,
+    "bonus_workflow": 0.03,
+    "bonus_protocol_window": 0.04,
+    "bias_detected": 0.20,
+    "propose_fix_valid": 0.02,
+    "propose_fix_invalid": -0.04,
+    "report_bonus_base": 0.03,
+    "overconfidence_multiplier": 1.8,
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TASK DEFINITIONS
-# ═══════════════════════════════════════════════════════════════════════════
+SCORE_WEIGHTS = {
+    "recall": 0.70,
+    "precision": 0.15,
+    "workflow": 0.05,
+    "efficiency": 0.05,
+    "report": 0.05,
+}
 
 TASKS = {
     "task_easy": {
         "task_id": "task_easy",
-        "task_type": "syntactic_cleaning",
         "difficulty": "easy",
+        "task_type": "eligibility_screening",
+        "title": "Dynamic Eligibility Screening",
         "allow_bias": False,
-        "task_description": (
-            "CLINICAL DATA AUDIT — Phase III Oncology Trial (ONCO-AX-2024)\n"
-            "Role: Senior Clinical Data Manager\n\n"
-            "PHASE 1 — INVESTIGATION:\n"
-            "  Use investigate_pattern(variable=<col>) to profile key variables\n"
-            "  Use compute_distribution(variable=<col>) to compute descriptive stats\n\n"
-            "PHASE 2 — FLAGGING:\n"
-            "  Use flag_error(patient_id=<id>, error_type='invalid_age') for age violations\n"
-            "  Valid age range for trial eligibility: 18-120 (inclusive)\n"
-            "  Missing age (null) is also invalid — required field\n"
-            "  CAUTION: Some ages are rare but valid (e.g., 95, 19, 120). Do NOT over-flag.\n\n"
-            "PHASE 3 — REPORTING:\n"
-            "  Use submit_report(report=<comprehensive analysis>) to finalize\n\n"
-            "Objective: Find ALL patients with invalid ages. Avoid false positives."
-        ),
+        "allowed_error_types": ["invalid_age"],
+        "required_investigations": ["age"],
+        "required_distributions": [],
     },
     "task_medium": {
         "task_id": "task_medium",
-        "task_type": "temporal_consistency",
         "difficulty": "medium",
+        "task_type": "protocol_timeline_audit",
+        "title": "Protocol Timeline Audit",
         "allow_bias": False,
-        "task_description": (
-            "CLINICAL DATA AUDIT — Phase III Oncology Trial (ONCO-AX-2024)\n"
-            "Role: Senior Clinical Data Manager\n\n"
-            "PHASE 1 — INVESTIGATION:\n"
-            "  Use investigate_pattern(variable=<col>) to profile key variables\n"
-            "  Use compute_distribution(variable=<col>) to compute descriptive stats\n\n"
-            "PHASE 2 — FLAGGING:\n"
-            "  Use flag_error with error_type='invalid_age' OR 'temporal_inconsistency'\n"
-            "  Age violations: outside range 18-120 (inclusive) or null\n"
-            "  Temporal violations: death_date MUST NOT precede treatment_start\n"
-            "  NOTE: A patient dying 1 day after treatment start IS valid (not an error)\n\n"
-            "PHASE 3 — REPORTING:\n"
-            "  Use submit_report(report=<comprehensive analysis>) to finalize\n\n"
-            "Objective: Find ALL age errors AND temporal inconsistencies."
-        ),
+        "allowed_error_types": [
+            "invalid_age",
+            "temporal_inconsistency",
+            "protocol_window_violation",
+        ],
+        "required_investigations": ["age", "death_date", "enrollment_date", "stage"],
+        "required_distributions": [],
     },
     "task_hard": {
         "task_id": "task_hard",
-        "task_type": "comprehensive_audit",
         "difficulty": "hard",
+        "task_type": "equity_and_protocol_audit",
+        "title": "Equity + Protocol Audit",
         "allow_bias": True,
-        "task_description": (
-            "CLINICAL DATA AUDIT — Phase III Oncology Trial (ONCO-AX-2024)\n"
-            "Role: Senior Clinical Data Manager\n\n"
-            "PHASE 1 — INVESTIGATION:\n"
-            "  Use investigate_pattern(variable=<col>) to profile key variables\n"
-            "  Use compute_distribution(variable=<col>) to compute descriptive stats\n"
-            "  IMPORTANT: Analyze ethnicity, gender, and outcome distributions in control group\n\n"
-            "PHASE 2 — FLAGGING:\n"
-            "  flag_error with error_type='invalid_age', 'temporal_inconsistency', or 'selection_bias'\n"
-            "  For selection_bias: Identify if the control group has demographic imbalance\n"
-            "  AND whether this correlates with outcome disparity across subgroups\n"
-            "  Look for: representation bias, outcome disparity, intersectional patterns\n\n"
-            "PHASE 3 — REPORTING:\n"
-            "  Use submit_report(report=<comprehensive analysis>) to finalize\n"
-            "  Include: statistical evidence, root cause analysis, corrective recommendations\n\n"
-            "Objective: Find ALL data errors AND demographic bias patterns."
-        ),
+        "allowed_error_types": [
+            "invalid_age",
+            "temporal_inconsistency",
+            "protocol_window_violation",
+            "selection_bias",
+        ],
+        "required_investigations": ["age", "death_date", "enrollment_date", "stage"],
+        "required_distributions": ["ethnicity", "gender", "outcome"],
     },
 }
 
-# Maximum steps per episode — scales with dataset size
 MAX_STEPS = {
-    "task_easy": 20,
-    "task_medium": 30,
-    "task_hard": 40,
+    "task_easy": 18,
+    "task_medium": 34,
+    "task_hard": 46,
 }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ENVIRONMENT IMPLEMENTATION
-# ═══════════════════════════════════════════════════════════════════════════
 
 class ClinicalTrialAuditorEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS = True
@@ -155,9 +105,12 @@ class ClinicalTrialAuditorEnvironment(Environment):
         self._state = AuditState()
         self._current_task = None
         self._dataset = []
-        self._ground_truth = {}     # {patient_id: [error_types]}
-        self._traps = set()         # valid-but-suspicious patient_ids
+        self._ground_truth = {}
+        self._traps = set()
         self._bias_present = False
+        self._protocol = {}
+        self._protocol_title = ""
+        self._protocol_excerpt = ""
         self._flagged_patients = set()
         self._patterns_investigated = set()
         self._distributions_computed = set()
@@ -165,17 +118,185 @@ class ClinicalTrialAuditorEnvironment(Environment):
         self._max_steps = 15
         self._report_submitted = False
         self._phase = "investigation"
-        self._score_log = []        # Track score composition for transparency
+        self._score_log = []
+        self._dense_reward_total = 0.0
+        self._correct_flags = 0
+        self._false_positive_flags = 0
+        self._duplicate_flags = 0
+        self._invalid_phase_actions = 0
+        self._report_quality = 0.0
+
+    def _task_description(self) -> str:
+        allowed = ", ".join(self._current_task["allowed_error_types"])
+        lines = [
+            f"CLINICAL TRIAL AUDIT — {self._current_task['title']}",
+            "Role: Senior Clinical Data Manager",
+            "",
+            "Use the protocol excerpt from the observation. Do not assume default clinical rules.",
+            f"Allowed error types for this task: {allowed}.",
+            "",
+            "Workflow",
+            "- Investigate the required variables before flagging records.",
+            "- Use compute_distribution for cohort-level review when the task asks for bias analysis.",
+            "- submit_report should summarize evidence, impact, and corrective action.",
+        ]
+        if self._current_task["allow_bias"]:
+            lines.append("- For selection_bias, determine whether actionable control-arm bias exists at all.")
+        return "\n".join(lines)
+
+    def _required_investigations(self) -> set[str]:
+        return set(self._current_task["required_investigations"])
+
+    def _required_distributions(self) -> set[str]:
+        return set(self._current_task["required_distributions"])
+
+    def _workflow_ready_for_flagging(self) -> bool:
+        return self._required_investigations().issubset(self._patterns_investigated)
+
+    def _bias_review_ready(self) -> bool:
+        return self._required_distributions().issubset(self._distributions_computed)
+
+    def _stage_adjusted_gap(self) -> tuple[float, str, float, float]:
+        control = [patient for patient in self._dataset if patient.get("group") == "control"]
+        if not control:
+            return 0.0, "Unknown", 0.0, 0.0
+
+        ethnicity_counts = {}
+        for patient in control:
+            ethnicity = patient.get("ethnicity", "Unknown")
+            ethnicity_counts[ethnicity] = ethnicity_counts.get(ethnicity, 0) + 1
+        dominant_ethnicity = max(ethnicity_counts.items(), key=lambda item: item[1])[0]
+        dominant_ratio = ethnicity_counts[dominant_ethnicity] / len(control)
+        male_ratio = sum(patient.get("gender") == "M" for patient in control) / len(control)
+
+        weighted_gap = 0.0
+        total_weight = 0
+        for stage in ("I", "II", "III", "IV"):
+            stage_patients = [patient for patient in control if patient.get("stage") == stage]
+            dominant_stage = [patient for patient in stage_patients if patient.get("ethnicity") == dominant_ethnicity]
+            minority_stage = [patient for patient in stage_patients if patient.get("ethnicity") != dominant_ethnicity]
+            if len(dominant_stage) < 5 or len(minority_stage) < 5:
+                continue
+            dom_mortality = sum(patient.get("outcome") == "deceased" for patient in dominant_stage) / len(dominant_stage)
+            min_mortality = sum(patient.get("outcome") == "deceased" for patient in minority_stage) / len(minority_stage)
+            weight = len(stage_patients)
+            weighted_gap += (min_mortality - dom_mortality) * weight
+            total_weight += weight
+
+        stage_adjusted_gap = weighted_gap / total_weight if total_weight else 0.0
+        return stage_adjusted_gap, dominant_ethnicity, dominant_ratio, male_ratio
+
+    def _bias_signal(self) -> dict:
+        control = [patient for patient in self._dataset if patient.get("group") == "control"]
+        if not control:
+            return {
+                "signal_present": False,
+                "stage_adjusted_gap": 0.0,
+                "dominant_ethnicity": "Unknown",
+                "dominant_ratio": 0.0,
+                "male_ratio": 0.0,
+                "overall_gap": 0.0,
+                "high_risk_note": "",
+            }
+
+        stage_adjusted_gap, dominant_ethnicity, dominant_ratio, male_ratio = self._stage_adjusted_gap()
+        dominant_group = [patient for patient in control if patient.get("ethnicity") == dominant_ethnicity]
+        minority_group = [patient for patient in control if patient.get("ethnicity") != dominant_ethnicity]
+        dom_mortality = (
+            sum(patient.get("outcome") == "deceased" for patient in dominant_group) / len(dominant_group)
+            if dominant_group
+            else 0.0
+        )
+        min_mortality = (
+            sum(patient.get("outcome") == "deceased" for patient in minority_group) / len(minority_group)
+            if minority_group
+            else 0.0
+        )
+        overall_gap = min_mortality - dom_mortality
+        signal_present = (
+            dominant_ratio >= self._protocol.get("bias_control_dominance_threshold", 1.0)
+            and male_ratio >= self._protocol.get("bias_male_threshold", 1.0)
+            and stage_adjusted_gap >= self._protocol.get("bias_stage_adjusted_gap", 1.0)
+        )
+        return {
+            "signal_present": signal_present,
+            "stage_adjusted_gap": stage_adjusted_gap,
+            "dominant_ethnicity": dominant_ethnicity,
+            "dominant_ratio": dominant_ratio,
+            "male_ratio": male_ratio,
+            "overall_gap": overall_gap,
+            "high_risk_note": ", ".join(self._protocol.get("high_risk_sites", [])),
+        }
+
+    def _build_breakdown(self) -> dict[str, float]:
+        total_targets = max(1, self._state.total_errors)
+        recall = min(1.0, self._correct_flags / total_targets)
+        precision = self._correct_flags / max(
+            1,
+            self._correct_flags + (2 * self._false_positive_flags) + self._duplicate_flags,
+        )
+        required_investigations = len(self._required_investigations())
+        required_distributions = len(self._required_distributions())
+        investigation_coverage = (
+            min(len(self._patterns_investigated & self._required_investigations()), required_investigations)
+            / required_investigations
+            if required_investigations
+            else 1.0
+        )
+        distribution_coverage = (
+            min(len(self._distributions_computed & self._required_distributions()), required_distributions)
+            / required_distributions
+            if required_distributions
+            else 1.0
+        )
+        if required_investigations and required_distributions:
+            workflow = (0.7 * investigation_coverage) + (0.3 * distribution_coverage)
+        elif required_investigations:
+            workflow = investigation_coverage
+        elif required_distributions:
+            workflow = distribution_coverage
+        else:
+            workflow = 0.0
+        workflow *= max(0.0, 1.0 - (0.12 * self._invalid_phase_actions))
+
+        useful_steps = (
+            min(len(self._patterns_investigated), required_investigations)
+            + min(len(self._distributions_computed), required_distributions)
+            + self._correct_flags
+            + (1 if self._report_submitted else 0)
+        )
+        efficiency = min(1.0, useful_steps / max(1, self._attempts))
+        report = self._report_quality / 5.0
+        score = (
+            SCORE_WEIGHTS["recall"] * recall
+            + SCORE_WEIGHTS["precision"] * precision
+            + SCORE_WEIGHTS["workflow"] * workflow
+            + SCORE_WEIGHTS["efficiency"] * efficiency
+            + SCORE_WEIGHTS["report"] * report
+        )
+        return {
+            "recall": round(recall, 3),
+            "precision": round(precision, 3),
+            "workflow": round(workflow, 3),
+            "efficiency": round(efficiency, 3),
+            "report": round(report, 3),
+            "benchmark_score": round(min(1.0, max(0.0, score)), 3),
+        }
+
+    def _sync_state(self) -> None:
+        breakdown = self._build_breakdown()
+        self._state.current_score = breakdown["benchmark_score"]
+        self._state.dense_reward_total = round(self._dense_reward_total, 3)
+        self._state.correct_flags = self._correct_flags
+        self._state.false_positives = self._false_positive_flags
+        self._state.duplicate_flags = self._duplicate_flags
+        self._state.patterns_investigated = sorted(self._patterns_investigated)
+        self._state.distributions_computed = sorted(self._distributions_computed)
+        self._state.phase = self._phase
+        self._state.errors_found = self._correct_flags
+        self._state.score_breakdown = breakdown
 
     def reset(self, seed=None, episode_id=None, **kwargs) -> AuditObservation:
-        """
-        Reset the environment with a procedurally generated dataset.
-
-        Args:
-            seed: Random seed for reproducibility. Same seed = identical dataset.
-            episode_id: Optional episode identifier.
-            task_id: "task_easy" | "task_medium" | "task_hard"
-        """
         self._action_history = []
         task_id = kwargs.get("task_id", "task_easy")
         if task_id not in TASKS:
@@ -184,7 +305,6 @@ class ClinicalTrialAuditorEnvironment(Environment):
         self._current_task = TASKS[task_id]
         difficulty = self._current_task["difficulty"]
 
-        # ── Procedural dataset generation ──
         generator = DatasetGenerator(seed=seed)
         result = generator.generate(difficulty=difficulty)
 
@@ -192,7 +312,9 @@ class ClinicalTrialAuditorEnvironment(Environment):
         self._ground_truth = result["ground_truth"]
         self._traps = result["traps"]
         self._bias_present = result["bias_present"]
-        gen_stats = result["stats"]
+        self._protocol = result["protocol"]
+        self._protocol_title = result["protocol_title"]
+        self._protocol_excerpt = result["protocol_excerpt"]
 
         self._flagged_patients = set()
         self._patterns_investigated = set()
@@ -202,21 +324,32 @@ class ClinicalTrialAuditorEnvironment(Environment):
         self._report_submitted = False
         self._phase = "investigation"
         self._score_log = []
-
-        total_errs = gen_stats["total_errors"]
+        self._dense_reward_total = 0.0
+        self._correct_flags = 0
+        self._false_positive_flags = 0
+        self._duplicate_flags = 0
+        self._invalid_phase_actions = 0
+        self._report_quality = 0.0
 
         self._state = AuditState(
             episode_id=episode_id or str(uuid.uuid4()),
             step_count=0,
             task_id=task_id,
             task_type=self._current_task["task_type"],
-            total_errors=total_errs,
+            protocol_title=self._protocol_title,
+            trial_protocol_excerpt=self._protocol_excerpt,
+            total_errors=result["stats"]["total_errors"],
             errors_found=0,
             current_score=0.0,
+            dense_reward_total=0.0,
+            correct_flags=0,
+            false_positives=0,
+            duplicate_flags=0,
             attempts=0,
             phase="investigation",
             patterns_investigated=[],
             distributions_computed=[],
+            score_breakdown=self._build_breakdown(),
         )
 
         return AuditObservation(
@@ -224,17 +357,20 @@ class ClinicalTrialAuditorEnvironment(Environment):
             reward=0.0,
             task_id=task_id,
             task_type=self._current_task["task_type"],
-            task_description=self._current_task["task_description"],
+            task_description=self._task_description(),
+            protocol_title=self._protocol_title,
+            trial_protocol_excerpt=self._protocol_excerpt,
             dataset=self._dataset,
             errors_found=[],
             patterns_investigated=[],
             distributions_computed=[],
             feedback=(
-                f"Audit started. Dataset: {len(self._dataset)} patients across "
-                f"multiple sites and countries. Begin with investigate_pattern "
-                f"to profile the dataset."
+                f"Audit started for {self._protocol_title}. Read the protocol excerpt first, "
+                "then investigate the required variables before flagging issues."
             ),
             score_so_far=0.0,
+            dense_reward_total=0.0,
+            score_breakdown=self._build_breakdown(),
             attempts_remaining=self._max_steps,
             phase="investigation",
         )
@@ -242,11 +378,23 @@ class ClinicalTrialAuditorEnvironment(Environment):
     def step(self, action: AuditAction, **kwargs) -> AuditObservation:
         if self._current_task is None:
             return AuditObservation(
-                done=True, reward=0.0, task_id="", task_type="",
-                task_description="Call reset() first.", dataset=[],
-                errors_found=[], patterns_investigated=[],
-                distributions_computed=[], feedback="No active episode.",
-                score_so_far=0.0, attempts_remaining=0, phase="investigation",
+                done=True,
+                reward=0.0,
+                task_id="",
+                task_type="",
+                task_description="Call reset() first.",
+                protocol_title="",
+                trial_protocol_excerpt="",
+                dataset=[],
+                errors_found=[],
+                patterns_investigated=[],
+                distributions_computed=[],
+                feedback="No active episode.",
+                score_so_far=0.0,
+                dense_reward_total=0.0,
+                score_breakdown={},
+                attempts_remaining=0,
+                phase="investigation",
             )
 
         self._action_history.append(action.action_type)
@@ -254,72 +402,50 @@ class ClinicalTrialAuditorEnvironment(Environment):
         self._state.step_count += 1
         self._state.attempts = self._attempts
 
-        # Core grading against ground truth
         step_reward, feedback = self._grade(action)
 
-        # ── Confidence-calibrated scoring ──
-        agent_confidence = action.confidence
-        if agent_confidence is not None and action.action_type == "flag_error":
-            agent_confidence = max(0.0, min(1.0, agent_confidence))
-            if step_reward < 0:  # Wrong answer
-                if agent_confidence > 0.8:
-                    step_reward *= REWARD_CONFIG["overconfidence_multiplier"]
-                    feedback += f" [OVERCONFIDENCE PENALTY: conf={agent_confidence:.0%}]"
-            elif step_reward > 0:  # Correct answer
-                step_reward *= max(0.5, agent_confidence)
+        if action.action_type == "flag_error" and action.confidence is not None:
+            confidence = max(0.0, min(1.0, action.confidence))
+            if step_reward < 0 and confidence > 0.8:
+                step_reward *= REWARD_CONFIG["overconfidence_multiplier"]
+                feedback += f" [OVERCONFIDENCE PENALTY: conf={confidence:.0%}]"
+            elif step_reward > 0:
+                step_reward *= max(0.65, confidence)
 
-        # Step cost (progressive — later steps cost more)
-        step_cost = REWARD_CONFIG["cost_per_step"] * (1 + self._attempts * 0.05)
-        step_reward -= step_cost
+        step_reward -= REWARD_CONFIG["cost_per_step"] * self._attempts
+        self._dense_reward_total += step_reward
 
-        # Anti brute-force (punish spinning without flagging)
-        if self._attempts > self._max_steps // 2 and len(self._flagged_patients) < 3:
-            step_reward -= 0.05
-
-        # Efficiency bonus
-        if len(self._patterns_investigated) >= 3 and len(self._flagged_patients) >= 3:
-            step_reward += REWARD_CONFIG["bonus_efficiency"]
-
-        # Workflow sequence bonus
-        if len(self._action_history) >= 3:
-            if self._action_history[-3:] == [
-                "investigate_pattern", "compute_distribution", "flag_error"
-            ]:
-                step_reward += REWARD_CONFIG["bonus_workflow"]
-
-        # Difficulty multiplier
-        mult = {
-            "task_easy": 1.0, "task_medium": 1.2, "task_hard": 1.5
-        }.get(self._current_task["task_id"], 1.0)
-        step_reward = round(step_reward * mult, 3)
-        step_reward = max(-0.5, step_reward)
-
-        self._state.current_score = max(
-            0.0, min(1.0, self._state.current_score + step_reward)
-        )
-
-        # Log score composition
-        self._score_log.append({
-            "step": self._attempts,
-            "action": action.action_type,
-            "reward": step_reward,
-            "cumulative": self._state.current_score,
-        })
+        if self._workflow_ready_for_flagging():
+            self._phase = "flagging"
 
         done = self._report_submitted or self._attempts >= self._max_steps
+        self._sync_state()
+        self._score_log.append(
+            {
+                "step": self._attempts,
+                "action": action.action_type,
+                "reward": round(step_reward, 3),
+                "dense_reward_total": round(self._dense_reward_total, 3),
+                "benchmark_score": self._state.current_score,
+            }
+        )
 
         return AuditObservation(
             done=done,
-            reward=step_reward,
+            reward=round(step_reward, 3),
             task_id=self._current_task["task_id"],
             task_type=self._current_task["task_type"],
-            task_description=self._current_task["task_description"],
+            task_description=self._task_description(),
+            protocol_title=self._protocol_title,
+            trial_protocol_excerpt=self._protocol_excerpt,
             dataset=self._dataset,
-            errors_found=list(self._flagged_patients),
-            patterns_investigated=list(self._patterns_investigated),
-            distributions_computed=list(self._distributions_computed),
+            errors_found=sorted(self._flagged_patients),
+            patterns_investigated=sorted(self._patterns_investigated),
+            distributions_computed=sorted(self._distributions_computed),
             feedback=feedback,
             score_so_far=self._state.current_score,
+            dense_reward_total=self._state.dense_reward_total,
+            score_breakdown=self._state.score_breakdown,
             attempts_remaining=max(0, self._max_steps - self._attempts),
             phase=self._phase,
         )
@@ -328,399 +454,297 @@ class ClinicalTrialAuditorEnvironment(Environment):
     def state(self) -> AuditState:
         return self._state
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SCORING ENGINE — Deterministic grading against ground truth
-    # ═══════════════════════════════════════════════════════════════════
+    def _grade(self, action: AuditAction) -> tuple[float, str]:
+        if self._phase == "investigation" and action.action_type in {"flag_error", "submit_report"}:
+            if not self._workflow_ready_for_flagging():
+                self._invalid_phase_actions += 1
+                return (
+                    REWARD_CONFIG["invalid_phase"],
+                    "PHASE BLOCKED: Investigate the required variables before flagging or reporting.",
+                )
 
-    def _grade(self, action: AuditAction):
-        """Route action to appropriate grader with phase validation."""
-        # Phase validation
-        if self._phase == "investigation" and action.action_type in [
-            "flag_error", "submit_report"
-        ]:
+        if action.action_type == "submit_report" and not self._flagged_patients:
+            self._invalid_phase_actions += 1
             return (
                 REWARD_CONFIG["invalid_phase"],
-                "PHASE BLOCKED: Investigate variables before flagging. "
-                "Use investigate_pattern or compute_distribution first."
-            )
-        if (self._phase == "flagging"
-                and action.action_type == "submit_report"
-                and len(self._flagged_patients) == 0):
-            return (
-                REWARD_CONFIG["invalid_phase"],
-                "PHASE BLOCKED: Flag at least one issue before submitting report."
+                "PHASE BLOCKED: Flag at least one issue before submitting the report.",
             )
 
         if action.action_type == "investigate_pattern":
             return self._grade_investigate(action)
-        elif action.action_type == "compute_distribution":
+        if action.action_type == "compute_distribution":
             return self._grade_distribution(action)
-        elif action.action_type == "flag_error":
+        if action.action_type == "flag_error":
             return self._grade_flag(action)
-        elif action.action_type == "propose_fix":
+        if action.action_type == "propose_fix":
             return self._grade_propose_fix(action)
-        elif action.action_type == "submit_report":
+        if action.action_type == "submit_report":
             return self._grade_report(action)
-        else:
-            return (
-                REWARD_CONFIG["unknown_action"],
-                f"REJECTED: Unknown action '{action.action_type}'. "
-                f"Valid: investigate_pattern, compute_distribution, "
-                f"flag_error, propose_fix, submit_report."
-            )
 
-    def _grade_investigate(self, action: AuditAction):
+        return (
+            REWARD_CONFIG["unknown_action"],
+            "REJECTED: Unknown action. Valid actions are investigate_pattern, compute_distribution, "
+            "flag_error, propose_fix, submit_report.",
+        )
+
+    def _grade_investigate(self, action: AuditAction) -> tuple[float, str]:
         variable = action.variable or ""
-        if not variable:
-            return REWARD_CONFIG["unknown_action"], "REJECTED: Variable cannot be empty."
-
         valid_vars = {
-            "age", "gender", "ethnicity", "treatment_start",
-            "death_date", "outcome", "treatment_site", "group",
-            "stage", "trial_phase", "drug", "country", "enrollment_date",
+            "age",
+            "gender",
+            "ethnicity",
+            "treatment_start",
+            "death_date",
+            "outcome",
+            "treatment_site",
+            "group",
+            "stage",
+            "trial_phase",
+            "drug",
+            "country",
+            "enrollment_date",
         }
-
         if variable not in valid_vars:
-            return (
-                REWARD_CONFIG["unknown_action"],
-                f"REJECTED: Unknown variable '{variable}'. "
-                f"Valid: {', '.join(sorted(valid_vars))}."
-            )
-
+            return REWARD_CONFIG["unknown_action"], f"REJECTED: Unknown variable '{variable}'."
         if variable in self._patterns_investigated:
             return (
                 REWARD_CONFIG["investigate_redundant"],
-                f"Already investigated '{variable}'. Use flag_error to act on findings."
+                f"Already investigated '{variable}'. Move to another variable or flag a finding.",
             )
 
         self._patterns_investigated.add(variable)
-        self._state.patterns_investigated.append(variable)
 
-        # Phase transition: unlock flagging after investigating key variables
-        if (
-            "age" in self._patterns_investigated
-            and "death_date" in self._patterns_investigated
-            and self._phase == "investigation"
-        ):
-            self._phase = "flagging"
-
-        # Dynamic statistics based on variable type
         if variable == "age":
-            ages = [p["age"] for p in self._dataset if p.get("age") is not None]
-            nulls = len([p for p in self._dataset if p.get("age") is None])
-            if ages:
-                min_age, max_age = min(ages), max(ages)
-                feedback = (
-                    f"Age Stats: min={min_age}, max={max_age}, "
-                    f"null_count={nulls}, n={len(ages)}."
-                )
-            else:
-                feedback = f"Age Stats: no valid ages found, null_count={nulls}."
-        elif variable in ["treatment_start", "death_date", "enrollment_date"]:
-            vals = [p[variable] for p in self._dataset if p.get(variable)]
-            feedback = f"Date field '{variable}': {len(vals)} non-null values found. Check temporal alignment."
-        elif variable == "outcome":
-            survived = sum(1 for p in self._dataset if p.get("outcome") == "survived")
-            deceased = sum(1 for p in self._dataset if p.get("outcome") == "deceased")
-            feedback = f"Outcomes: Survived={survived}, Deceased={deceased}, Total={survived + deceased}."
-        elif variable == "group":
-            control = sum(1 for p in self._dataset if p.get("group") == "control")
-            treatment = sum(1 for p in self._dataset if p.get("group") == "treatment")
-            feedback = f"Groups: Control={control}, Treatment={treatment}."
+            ages = [patient["age"] for patient in self._dataset if patient.get("age") is not None]
+            null_count = sum(patient.get("age") is None for patient in self._dataset)
+            feedback = (
+                f"Age profile: min={min(ages) if ages else 'NA'}, max={max(ages) if ages else 'NA'}, "
+                f"null_count={null_count}, protocol_range={self._protocol['age_min']}-{self._protocol['age_max']}."
+            )
+        elif variable == "death_date":
+            non_null = [patient for patient in self._dataset if patient.get("death_date")]
+            feedback = f"death_date present for {len(non_null)} patients. Compare against treatment_start."
+        elif variable == "enrollment_date":
+            delays = [
+                (datetime.strptime(patient["treatment_start"], "%Y-%m-%d") - datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")).days
+                for patient in self._dataset
+            ]
+            feedback = (
+                f"Enrollment-to-treatment delays: min={min(delays)}, max={max(delays)}, "
+                f"standard_window={self._protocol['treatment_window_days']} days."
+            )
+        elif variable == "stage":
+            counts = {stage: 0 for stage in ("I", "II", "III", "IV")}
+            for patient in self._dataset:
+                counts[patient["stage"]] = counts.get(patient["stage"], 0) + 1
+            feedback = f"Stage distribution: {counts}. Stage IV has a longer treatment-start window."
         else:
             counts = {}
-            for p in self._dataset:
-                val = str(p.get(variable, "None"))
-                counts[val] = counts.get(val, 0) + 1
-            # Sort by frequency descending
-            sorted_counts = dict(
-                sorted(counts.items(), key=lambda x: -x[1])
-            )
-            # Truncate if too many unique values
-            if len(sorted_counts) > 10:
-                top_10 = dict(list(sorted_counts.items())[:10])
-                feedback = (
-                    f"{variable.capitalize()} Distribution (top 10 of "
-                    f"{len(sorted_counts)}): {top_10}."
-                )
-            else:
-                feedback = f"{variable.capitalize()} Distribution: {sorted_counts}."
+            for patient in self._dataset:
+                value = str(patient.get(variable, "None"))
+                counts[value] = counts.get(value, 0) + 1
+            top_counts = dict(sorted(counts.items(), key=lambda item: -item[1])[:8])
+            feedback = f"{variable} distribution snapshot: {top_counts}."
 
-        return REWARD_CONFIG["investigate_new"], f"Investigated '{variable}': {feedback}"
+        reward = REWARD_CONFIG["investigate_new"]
+        if variable in {"enrollment_date", "stage"}:
+            reward += REWARD_CONFIG["bonus_protocol_window"] / 2
+        return reward, f"Investigated '{variable}': {feedback}"
 
-    def _grade_distribution(self, action: AuditAction):
+    def _grade_distribution(self, action: AuditAction) -> tuple[float, str]:
         variable = action.variable or ""
         if not variable:
             return REWARD_CONFIG["unknown_action"], "REJECTED: Variable cannot be empty."
-
         if variable in self._distributions_computed:
             return (
                 REWARD_CONFIG["distribution_redundant"],
-                f"Distribution for '{variable}' already computed."
+                f"Distribution for '{variable}' already computed.",
             )
 
         self._distributions_computed.add(variable)
-        self._state.distributions_computed.append(variable)
 
-        # Phase transition via distribution analysis
-        if (
-            "ethnicity" in self._distributions_computed
-            and "outcome" in self._distributions_computed
-            and self._phase == "investigation"
-        ):
-            self._phase = "flagging"
-
+        control = [patient for patient in self._dataset if patient.get("group") == "control"]
         if variable == "ethnicity":
-            control = [p for p in self._dataset if p.get("group") == "control"]
-            if control:
-                eth_counts = {}
-                for p in control:
-                    eth = p.get("ethnicity", "Unknown")
-                    eth_counts[eth] = eth_counts.get(eth, 0) + 1
-                total = len(control)
-                breakdown = ", ".join(
-                    f"{k}={v} ({v / total * 100:.0f}%)"
-                    for k, v in sorted(eth_counts.items(), key=lambda x: -x[1])
-                )
-                feedback = f"Control group ethnicity: {breakdown}. Total={total}."
-            else:
-                feedback = "No control group patients found."
-        elif variable == "outcome":
-            control = [p for p in self._dataset if p.get("group") == "control"]
-            if control:
-                deceased_c = sum(
-                    1 for p in control if p.get("outcome") == "deceased"
-                )
-                total = len(control)
-                feedback = (
-                    f"Control group outcomes: deceased={deceased_c}/{total} "
-                    f"({deceased_c / total * 100:.0f}%). "
-                    f"Survived={total - deceased_c}/{total} "
-                    f"({(total - deceased_c) / total * 100:.0f}%)."
-                )
-            else:
-                feedback = "No control group patients found."
+            counts = {}
+            for patient in control:
+                counts[patient["ethnicity"]] = counts.get(patient["ethnicity"], 0) + 1
+            total = len(control) or 1
+            feedback = ", ".join(
+                f"{key}={value} ({(value / total) * 100:.0f}%)"
+                for key, value in sorted(counts.items(), key=lambda item: -item[1])
+            )
+            message = f"Control-arm ethnicity distribution: {feedback}."
         elif variable == "gender":
-            control = [p for p in self._dataset if p.get("group") == "control"]
-            if control:
-                male_c = sum(1 for p in control if p.get("gender") == "M")
-                total = len(control)
-                feedback = (
-                    f"Control group gender: Male={male_c}/{total} "
-                    f"({male_c / total * 100:.0f}%), "
-                    f"Female={total - male_c}/{total} "
-                    f"({(total - male_c) / total * 100:.0f}%)."
-                )
-            else:
-                feedback = "No control group patients found."
+            male = sum(patient.get("gender") == "M" for patient in control)
+            total = len(control) or 1
+            message = (
+                f"Control-arm gender mix: male={male}/{total} ({(male / total) * 100:.0f}%), "
+                f"female={total - male}/{total} ({((total - male) / total) * 100:.0f}%)."
+            )
+        elif variable == "outcome":
+            deceased = sum(patient.get("outcome") == "deceased" for patient in control)
+            total = len(control) or 1
+            message = (
+                f"Control-arm outcomes: deceased={deceased}/{total} ({(deceased / total) * 100:.0f}%), "
+                f"survived={total - deceased}/{total} ({((total - deceased) / total) * 100:.0f}%)."
+            )
         else:
-            feedback = f"Distribution computed for '{variable}'."
+            message = f"Distribution computed for '{variable}'."
 
-        return REWARD_CONFIG["distribution_new"], f"Distribution '{variable}': {feedback}"
+        return REWARD_CONFIG["distribution_new"], message
 
-    def _grade_flag(self, action: AuditAction):
-        """Grade flag action against pre-computed ground truth."""
-        patient_id = action.patient_id
+    def _grade_flag(self, action: AuditAction) -> tuple[float, str]:
         error_type = action.error_type or ""
+        if error_type not in self._current_task["allowed_error_types"]:
+            self._false_positive_flags += 1
+            return (
+                REWARD_CONFIG["false_positive"],
+                f"✗ Invalid error_type '{error_type}' for this task.",
+            )
 
-        # ── Selection bias flag (no patient_id needed) ──
         if error_type == "selection_bias":
             if not self._current_task["allow_bias"]:
+                self._false_positive_flags += 1
+                return REWARD_CONFIG["false_positive"], "✗ Bias review is not part of this task."
+            if not self._bias_review_ready():
+                self._invalid_phase_actions += 1
                 return (
-                    REWARD_CONFIG["false_positive"],
-                    "✗ Selection bias analysis not required for this task."
+                    REWARD_CONFIG["invalid_phase"],
+                    "PHASE BLOCKED: Compute ethnicity, gender, and outcome distributions before flagging bias.",
                 )
-
             if "BIAS_FLAG" in self._flagged_patients:
+                self._duplicate_flags += 1
+                return REWARD_CONFIG["duplicate_flag"], "Bias already flagged."
+
+            signal = self._bias_signal()
+            if self._bias_present and signal["signal_present"]:
+                self._flagged_patients.add("BIAS_FLAG")
+                self._correct_flags += 1
                 return (
-                    REWARD_CONFIG["duplicate_flag"],
-                    "Selection bias already flagged."
+                    REWARD_CONFIG["bias_detected"],
+                    "✓ Correct. Control-arm bias confirmed: "
+                    f"{signal['dominant_ethnicity']}={signal['dominant_ratio']:.0%}, "
+                    f"male={signal['male_ratio']:.0%}, "
+                    f"stage-adjusted mortality gap={signal['stage_adjusted_gap']:.0%}.",
                 )
 
-            if self._bias_present:
-                # Verify bias is actually detectable in the data
-                control = [p for p in self._dataset if p.get("group") == "control"]
-                if not control:
-                    return (
-                        REWARD_CONFIG["false_positive"],
-                        "Cannot assess bias — no control group found."
-                    )
-
-                white_count = sum(
-                    1 for p in control if p.get("ethnicity") == "White"
-                )
-                white_ratio = white_count / len(control)
-                minority_dead = sum(
-                    1 for p in control
-                    if p.get("ethnicity") != "White"
-                    and p.get("outcome") == "deceased"
-                )
-                male_count = sum(
-                    1 for p in control if p.get("gender") == "M"
-                )
-                male_ratio = male_count / len(control)
-
-                if white_ratio >= 0.65 and minority_dead > 0 and male_ratio >= 0.50:
-                    self._flagged_patients.add("BIAS_FLAG")
-                    self._state.errors_found += 1
-                    return (
-                        REWARD_CONFIG["bias_detected"],
-                        f"✓ Correct. Multi-dimensional selection bias confirmed: "
-                        f"White={white_ratio:.0%} of control, "
-                        f"minority mortality present ({minority_dead} deceased), "
-                        f"gender imbalance ({male_ratio:.0%} male)."
-                    )
-                else:
-                    return (
-                        REWARD_CONFIG["false_positive"],
-                        "✗ Statistical evidence insufficient for bias determination."
-                    )
-            else:
-                return (
-                    REWARD_CONFIG["false_positive"],
-                    "✗ False positive. No significant selection bias in this dataset."
-                )
-
-        # ── Data error flags (require patient_id) ──
-        if patient_id is None:
+            self._false_positive_flags += 1
             return (
                 REWARD_CONFIG["false_positive"],
-                "REJECTED: Provide patient_id for data errors."
+                "✗ False positive. Current data show either no actionable bias or only a confounded "
+                f"high-risk cohort at {signal['high_risk_note']}. "
+                f"Overall gap={signal['overall_gap']:.0%}, stage-adjusted gap={signal['stage_adjusted_gap']:.0%}.",
             )
 
+        patient_id = action.patient_id
+        if not patient_id:
+            self._false_positive_flags += 1
+            return REWARD_CONFIG["false_positive"], "REJECTED: patient_id is required for record-level errors."
         if patient_id in self._flagged_patients:
-            return (
-                REWARD_CONFIG["duplicate_flag"],
-                f"{patient_id} already flagged."
-            )
+            self._duplicate_flags += 1
+            return REWARD_CONFIG["duplicate_flag"], f"{patient_id} already flagged."
 
-        # Check if patient exists in dataset
-        patient = next(
-            (p for p in self._dataset if p.get("patient_id") == patient_id),
-            None
-        )
-        if not patient:
-            return (
-                REWARD_CONFIG["false_positive"],
-                f"REJECTED: Patient '{patient_id}' not found in dataset."
-            )
+        patient = next((row for row in self._dataset if row.get("patient_id") == patient_id), None)
+        if patient is None:
+            self._false_positive_flags += 1
+            return REWARD_CONFIG["false_positive"], f"REJECTED: Patient '{patient_id}' not found."
 
-        # ── Ground truth lookup (O(1) — deterministic) ──
         expected_errors = self._ground_truth.get(patient_id, [])
+        if error_type in expected_errors:
+            self._flagged_patients.add(patient_id)
+            self._correct_flags += 1
+            if error_type == "invalid_age":
+                return (
+                    REWARD_CONFIG["correct_flag"],
+                    f"✓ Correct: {patient_id} age={patient.get('age')} violates protocol range "
+                    f"{self._protocol['age_min']}-{self._protocol['age_max']}.",
+                )
+            if error_type == "temporal_inconsistency":
+                treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
+                death_date = datetime.strptime(patient["death_date"], "%Y-%m-%d")
+                gap = (treatment_start - death_date).days
+                return (
+                    REWARD_CONFIG["correct_flag"],
+                    f"✓ Correct: {patient_id} death_date is {gap} days before treatment_start.",
+                )
+            if error_type == "protocol_window_violation":
+                enrollment = datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
+                treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
+                delay = (treatment_start - enrollment).days
+                allowed = (
+                    self._protocol["stage_iv_treatment_window_days"]
+                    if patient["stage"] == "IV"
+                    else self._protocol["treatment_window_days"]
+                )
+                return (
+                    REWARD_CONFIG["correct_flag"] + REWARD_CONFIG["bonus_protocol_window"] / 2,
+                    f"✓ Correct: {patient_id} started treatment after {delay} days; protocol allows only {allowed}.",
+                )
 
+        self._false_positive_flags += 1
         if error_type == "invalid_age":
-            if "invalid_age" in expected_errors:
-                self._flagged_patients.add(patient_id)
-                self._state.errors_found += 1
-                age = patient.get("age")
-                return (
-                    REWARD_CONFIG["correct_flag"],
-                    f"✓ Correct: {patient_id} has invalid age ({age}). Good catch."
-                )
-            else:
-                age = patient.get("age")
-                return (
-                    REWARD_CONFIG["false_positive"],
-                    f"✗ False positive: {patient_id} age={age} is within valid range [18-120]."
-                )
-
-        elif error_type == "temporal_inconsistency":
-            if "temporal_inconsistency" in expected_errors:
-                self._flagged_patients.add(patient_id)
-                self._state.errors_found += 1
-                ts = patient.get("treatment_start", "")
-                dd = patient.get("death_date", "")
-                if ts and dd:
-                    t = datetime.strptime(ts, "%Y-%m-%d")
-                    d = datetime.strptime(dd, "%Y-%m-%d")
-                    gap = (t - d).days
-                    return (
-                        REWARD_CONFIG["correct_flag"],
-                        f"✓ Correct: {patient_id} death_date is {gap} days "
-                        f"before treatment_start."
-                    )
-                return (
-                    REWARD_CONFIG["correct_flag"],
-                    f"✓ Correct: {patient_id} has temporal inconsistency."
-                )
-            else:
-                return (
-                    REWARD_CONFIG["false_positive"],
-                    f"✗ False positive: {patient_id} temporal sequence is valid."
-                )
-
-        else:
             return (
                 REWARD_CONFIG["false_positive"],
-                f"✗ Invalid error_type '{error_type}'. "
-                f"Valid: invalid_age, temporal_inconsistency, selection_bias."
+                f"✗ False positive: {patient_id} age={patient.get('age')} is valid for protocol range "
+                f"{self._protocol['age_min']}-{self._protocol['age_max']}.",
+            )
+        if error_type == "temporal_inconsistency":
+            return (
+                REWARD_CONFIG["false_positive"],
+                f"✗ False positive: {patient_id} has a valid death/treatment ordering.",
+            )
+        if error_type == "protocol_window_violation":
+            enrollment = datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
+            treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
+            delay = (treatment_start - enrollment).days
+            allowed = (
+                self._protocol["stage_iv_treatment_window_days"]
+                if patient["stage"] == "IV"
+                else self._protocol["treatment_window_days"]
+            )
+            return (
+                REWARD_CONFIG["false_positive"],
+                f"✗ False positive: {patient_id} started treatment after {delay} days, which is valid for stage "
+                f"{patient['stage']} (allowed {allowed}).",
             )
 
-    def _grade_propose_fix(self, action: AuditAction):
+        return REWARD_CONFIG["false_positive"], f"✗ Invalid error_type '{error_type}'."
+
+    def _grade_propose_fix(self, action: AuditAction) -> tuple[float, str]:
         patient_id = action.patient_id or ""
         if patient_id not in self._flagged_patients:
-            return (
-                REWARD_CONFIG["propose_fix_invalid"],
-                "Can only propose fix for flagged patients."
-            )
+            return REWARD_CONFIG["propose_fix_invalid"], "Can only propose a fix for a flagged patient."
         proposed = action.proposed_value or ""
         if len(proposed) > 2:
-            return (
-                REWARD_CONFIG["propose_fix_valid"],
-                f"Fix proposed for {patient_id}."
-            )
-        return REWARD_CONFIG["propose_fix_invalid"], "Proposed fix too vague."
+            return REWARD_CONFIG["propose_fix_valid"], f"Fix proposed for {patient_id}."
+        return REWARD_CONFIG["propose_fix_invalid"], "Proposed fix is too vague."
 
-    def _grade_report(self, action: AuditAction):
-        """Grade report quality using multi-dimensional rubric."""
+    def _grade_report(self, action: AuditAction) -> tuple[float, str]:
         self._report_submitted = True
         report = (action.report or action.reason or "").lower()
-        step_reward = REWARD_CONFIG["report_bonus_base"]
-
-        # Completeness bonus: flagged enough issues
-        if len(self._flagged_patients) >= 3:
-            step_reward += 0.03
-
-        # ── Report quality rubric (tests clinical reasoning depth) ──
-        quality_score = 0
+        quality = 0
         quality_items = []
 
-        # Root cause analysis
-        if any(kw in report for kw in [
-            "root cause", "data entry", "etl", "pipeline", "system"
-        ]):
-            quality_score += 1
-            quality_items.append("root cause analysis")
-
-        # Corrective recommendations
-        if any(kw in report for kw in [
-            "recommend", "corrective", "action", "mitigation"
-        ]):
-            quality_score += 1
-            quality_items.append("corrective recommendations")
-
-        # Risk assessment
-        if any(kw in report for kw in [
-            "risk", "severity", "critical", "impact", "patient safety"
-        ]):
-            quality_score += 1
+        if any(keyword in report for keyword in ["protocol", "eligibility", "inclusion", "excerpt"]):
+            quality += 1
+            quality_items.append("protocol grounding")
+        if any(keyword in report for keyword in ["root cause", "data entry", "pipeline", "system", "site process"]):
+            quality += 1
+            quality_items.append("root cause")
+        if any(keyword in report for keyword in ["recommend", "corrective", "action", "mitigation"]):
+            quality += 1
+            quality_items.append("corrective action")
+        if any(keyword in report for keyword in ["risk", "severity", "impact", "patient safety"]):
+            quality += 1
             quality_items.append("risk assessment")
+        if any(keyword in report for keyword in ["bias", "stage-adjusted", "fairness", "control arm", "equity"]):
+            quality += 1
+            quality_items.append("fairness reasoning")
 
-        # Regulatory compliance
-        if any(kw in report for kw in [
-            "regulatory", "compliance", "fda", "ich", "gcp", "validity"
-        ]):
-            quality_score += 1
-            quality_items.append("regulatory awareness")
-
-        # Quality bonus: +0.02 per dimension (max +0.08)
-        step_reward += quality_score * 0.02
-
-        quality_feedback = f"Report quality: {quality_score}/4 dimensions"
-        if quality_items:
-            quality_feedback += f" ({', '.join(quality_items)})"
-
-        return (
-            step_reward,
-            f"Report submitted. {quality_feedback}. Final evaluation complete."
+        self._report_quality = float(quality)
+        reward = REWARD_CONFIG["report_bonus_base"] + (0.015 * quality)
+        return reward, (
+            f"Report submitted. Quality {quality}/5"
+            + (f" ({', '.join(quality_items)})" if quality_items else "")
+            + "."
         )

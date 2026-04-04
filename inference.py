@@ -1,457 +1,428 @@
 """
-Clinical Trial Auditor — Multi-Agent Baseline Inference
-=========================================================
-Three agent modes to demonstrate environment difficulty gradient:
+Clinical Trial Auditor — Baseline Inference
+===========================================
+Demonstrates a deliberate difficulty gradient on the protocol-aware benchmark:
 
-  1. NAIVE    — Raw LLM prompt, no statistical tools → expected ~0.25-0.40
-  2. HEURISTIC — Simple rule-based agent → expected ~0.45-0.60
-  3. FULL     — Statistical Detection Engine + LLM Reasoning → expected ~0.85-0.95
-
-Usage:
-  python inference.py                      # Full agent (default)
-  python inference.py --mode naive         # Naive LLM-only agent
-  python inference.py --mode heuristic     # Simple heuristic agent
-  python inference.py --mode full          # Full agentic pipeline
-  python inference.py --mode all           # Run all three, side-by-side
-
-Pipeline (full mode):
-  1. PROFILE   → Schema-aware statistical analysis of dataset
-  2. DETECT    → Multi-detector anomaly pipeline with confidence scoring
-  3. ASSESS    → Risk severity + clinical impact evaluation
-  4. PLAN      → Task-adaptive optimal action sequence
-  5. REASON    → LLM for ambiguous cases + expert report generation
-  6. EXECUTE   → Deterministic environment interaction
-  7. EVALUATE  → Precision/recall/F1 metrics tracking
+  1. NAIVE     — raw prompt + small sample, weak structure
+  2. HEURISTIC — parses obvious rules but ignores key exceptions
+  3. FULL      — parses protocol, honors stage exceptions, stage-adjusts bias
 """
+
+from __future__ import annotations
+
+import argparse
+import json
 import os
+import re
+import statistics
 import sys
 import time
-import json
-import math
-import argparse
-import statistics
-from datetime import datetime
 from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Optional
+
+from openai import OpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from openai import OpenAI
 from client import ClinicalTrialAuditorEnv
 from models import AuditAction
 
-# ── Configuration ─────────────────────────────────────────────────────────
+try:
+    from server.clinical_trial_auditor_environment import ClinicalTrialAuditorEnvironment
+except ImportError:
+    ClinicalTrialAuditorEnvironment = None
+
+
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
+BASELINE_SEED = int(os.getenv("BASELINE_SEED", "20260402"))
 
-# Reproducible seed for baseline evaluation
-BASELINE_SEED = 20240401
+TASK_LIST = {
+    "task_easy": "Dynamic Eligibility Screening (Easy)",
+    "task_medium": "Protocol Timeline Audit (Medium)",
+    "task_hard": "Equity + Protocol Audit (Hard)",
+}
+
+TASK_SPECS = {
+    "task_easy": {
+        "investigations": ["age"],
+        "distributions": [],
+    },
+    "task_medium": {
+        "investigations": ["age", "death_date", "enrollment_date", "stage"],
+        "distributions": [],
+    },
+    "task_hard": {
+        "investigations": ["age", "death_date", "enrollment_date", "stage"],
+        "distributions": ["ethnicity", "gender", "outcome"],
+    },
+}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CORE DATA STRUCTURES
-# ═══════════════════════════════════════════════════════════════════════════
+@dataclass
+class ProtocolRules:
+    protocol_title: str
+    age_min: int
+    age_max: int
+    treatment_window_days: int
+    stage_iv_window_days: int
+    high_risk_sites: list[str] = field(default_factory=list)
+    bias_control_dominance_threshold: float = 1.0
+    bias_male_threshold: float = 1.0
+    bias_stage_adjusted_gap: float = 1.0
 
+    def allowed_window(self, stage: str) -> int:
+        return self.stage_iv_window_days if stage == "IV" else self.treatment_window_days
+
+
+@dataclass
 class Finding:
-    """A detected anomaly with confidence, risk severity, and explanation."""
-    def __init__(self, patient_id: str, error_type: str, reason: str,
-                 confidence: float, risk: str = "medium",
-                 value=None, statistical_context: str = ""):
-        self.patient_id = patient_id
-        self.error_type = error_type
-        self.reason = reason
-        self.confidence = min(1.0, max(0.0, confidence))
-        self.risk = risk
-        self.value = value
-        self.statistical_context = statistical_context
+    error_type: str
+    reason: str
+    patient_id: Optional[str] = None
+    confidence: float = 1.0
+    risk: str = "medium"
+    evidence: str = ""
 
     @property
     def priority_score(self) -> float:
-        risk_weights = {"critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.2}
-        return self.confidence * risk_weights.get(self.risk, 0.5)
-
-    def explain(self) -> str:
-        parts = [f"{self.error_type}: {self.reason}"]
-        if self.statistical_context:
-            parts.append(f"  Evidence: {self.statistical_context}")
-        parts.append(f"  Confidence: {self.confidence:.0%} | Risk: {self.risk.upper()}")
-        return "\n".join(parts)
+        risk_weight = {"critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.2}
+        return self.confidence * risk_weight.get(self.risk, 0.5)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODULE 1: DATA PROFILER — Robust statistical summary
-# ═══════════════════════════════════════════════════════════════════════════
-
-class DataProfiler:
-    """Schema-aware statistical profiler using robust estimators (IQR, MAD)."""
-
-    def __init__(self, dataset: list[dict]):
-        self.dataset = dataset
-        self.n = len(dataset)
-        self.columns = sorted({k for row in dataset for k in row.keys()})
-        self.types = self._infer_types()
-        self.profiles = {}
-
-    def _infer_types(self) -> dict:
-        types = {}
-        for col in self.columns:
-            vals = [r.get(col) for r in self.dataset if r.get(col) is not None]
-            if not vals:
-                types[col] = "unknown"
-            elif all(isinstance(v, (int, float)) for v in vals):
-                types[col] = "numeric"
-            elif all(isinstance(v, str) and self._is_date(v) for v in vals[:5]):
-                types[col] = "date"
-            elif col.lower().endswith("_id") or col.lower() == "id":
-                types[col] = "id"
-            else:
-                types[col] = "categorical"
-        return types
-
+class ProtocolParser:
     @staticmethod
-    def _is_date(s: str) -> bool:
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"):
-            try:
-                datetime.strptime(s, fmt)
-                return True
-            except ValueError:
-                pass
-        return False
-
-    def profile_numeric(self, col: str) -> dict:
-        values = [r[col] for r in self.dataset if r.get(col) is not None]
-        null_count = sum(1 for r in self.dataset if r.get(col) is None)
-        if not values:
-            return {"null_count": null_count, "valid_count": 0}
-
-        sorted_vals = sorted(values)
-        n = len(sorted_vals)
-        median = statistics.median(sorted_vals)
-        mean = statistics.mean(sorted_vals)
-        std = statistics.stdev(sorted_vals) if n > 1 else 0
-
-        q1 = sorted_vals[n // 4] if n >= 4 else sorted_vals[0]
-        q3 = sorted_vals[3 * n // 4] if n >= 4 else sorted_vals[-1]
-        iqr = q3 - q1
-
-        mad = statistics.median([abs(v - median) for v in sorted_vals])
-        mad_scaled = mad * 1.4826
-
-        return {
-            "mean": round(mean, 2), "std": round(std, 2),
-            "median": round(median, 2), "mad": round(mad_scaled, 2),
-            "min": min(values), "max": max(values),
-            "q1": q1, "q3": q3, "iqr": iqr,
-            "null_count": null_count, "valid_count": n,
-            "iqr_lower": q1 - 1.5 * iqr,
-            "iqr_upper": q3 + 1.5 * iqr,
-        }
-
-    def profile_categorical(self, col: str) -> dict:
-        vals = [str(r.get(col, "None")) for r in self.dataset]
-        counter = Counter(vals)
-        total = len(vals)
-        return {
-            "distribution": dict(counter),
-            "unique_count": len(counter),
-            "mode": counter.most_common(1)[0][0] if counter else None,
-            "mode_ratio": counter.most_common(1)[0][1] / total if counter else 0,
-        }
-
-    def profile_all(self) -> dict:
-        for col in self.columns:
-            if self.types.get(col) == "numeric":
-                self.profiles[col] = self.profile_numeric(col)
-            elif self.types.get(col) == "categorical":
-                self.profiles[col] = self.profile_categorical(col)
-        return self.profiles
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MODULE 2: ANOMALY DETECTORS — Confidence + Risk scoring
-# ═══════════════════════════════════════════════════════════════════════════
-
-class AgeAnomalyDetector:
-    """
-    Multi-layer age anomaly detection:
-    - Layer 1: Clinical domain constraints (18-120 for trial eligibility)
-    - Layer 2: Statistical outliers via IQR
-    - Layer 3: Biological plausibility
-    """
-    CLINICAL_MIN, CLINICAL_MAX = 18, 120
-
-    def detect(self, dataset: list[dict], profile: dict) -> list[Finding]:
-        findings = []
-        age_prof = profile.get("age", {})
-        median = age_prof.get("median", 60)
-        mad = age_prof.get("mad", 15)
-
-        for row in dataset:
-            pid = row.get("patient_id", "?")
-            age = row.get("age")
-
-            if age is None:
-                findings.append(Finding(
-                    patient_id=pid, error_type="invalid_age",
-                    reason="Missing age — required for trial eligibility",
-                    confidence=1.0, risk="high", value=None,
-                    statistical_context="Null value in mandatory field",
-                ))
-                continue
-
-            is_domain_violation = age < self.CLINICAL_MIN or age > self.CLINICAL_MAX
-
-            if is_domain_violation:
-                deviation = abs(age - median) / mad if mad > 0 else 0
-                is_biological_impossible = age < 0 or age > 122
-                if is_biological_impossible:
-                    conf, risk = 1.0, "critical"
-                    context = f"Biologically impossible (age={age})"
-                elif age > 200:
-                    conf, risk = 0.99, "critical"
-                    context = f"Likely sentinel/data entry error: {deviation:.1f} MAD from median"
-                else:
-                    conf, risk = 0.95, "high"
-                    context = f"Outside range [{self.CLINICAL_MIN}-{self.CLINICAL_MAX}]"
-
-                findings.append(Finding(
-                    patient_id=pid, error_type="invalid_age",
-                    reason=f"Age {age} violates clinical trial range [{self.CLINICAL_MIN}-{self.CLINICAL_MAX}]",
-                    confidence=conf, risk=risk, value=age,
-                    statistical_context=context,
-                ))
-
-        return findings
-
-
-class TemporalConsistencyDetector:
-    """Detects death_date before treatment_start violations."""
-
-    @staticmethod
-    def _parse_date(val) -> Optional[datetime]:
-        if not val or val in ("", "N/A", "None", "null"):
-            return None
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"):
-            try:
-                return datetime.strptime(str(val), fmt)
-            except (ValueError, TypeError):
-                pass
-        return None
-
-    def detect(self, dataset: list[dict], profile: dict) -> list[Finding]:
-        findings = []
-        for row in dataset:
-            pid = row.get("patient_id", "?")
-            early = self._parse_date(row.get("treatment_start"))
-            late = self._parse_date(row.get("death_date"))
-            if early and late and late < early:
-                gap = (early - late).days
-                risk = "critical" if gap > 180 else "high" if gap > 30 else "medium"
-                conf = min(1.0, 0.90 + gap / 3650)
-                findings.append(Finding(
-                    patient_id=pid, error_type="temporal_inconsistency",
-                    reason=f"death_date {row.get('death_date')} is {gap} days before treatment_start {row.get('treatment_start')}",
-                    confidence=conf, risk=risk,
-                    value=f"{gap}-day violation",
-                    statistical_context=f"Chronological ordering violated by {gap} days",
-                ))
-        return findings
-
-
-class SelectionBiasDetector:
-    """Multi-dimensional bias detection in control group."""
-    REPRESENTATION_THRESHOLD = 0.65
-    OUTCOME_DISPARITY_THRESHOLD = 0.20
-
-    def detect(self, dataset: list[dict], profile: dict) -> list[Finding]:
-        findings = []
-        control = [r for r in dataset if r.get("group") == "control"]
-        if not control:
-            return findings
-
-        total_control = len(control)
-        eth_counts = Counter(r.get("ethnicity", "Unknown") for r in control)
-        dominant = eth_counts.most_common(1)[0] if eth_counts else None
-        if not dominant:
-            return findings
-
-        dominant_name, dominant_count = dominant
-        representation_ratio = dominant_count / total_control
-
-        outcome_rates = {}
-        for eth, count in eth_counts.items():
-            deceased = sum(1 for r in control if r.get("ethnicity") == eth and r.get("outcome") == "deceased")
-            outcome_rates[eth] = deceased / count if count > 0 else 0
-
-        rates = list(outcome_rates.values())
-        max_disparity = max(rates) - min(rates) if len(rates) > 1 else 0
-
-        minority_deceased = sum(
-            1 for r in control
-            if r.get("ethnicity") != dominant_name and r.get("outcome") == "deceased"
+    def parse(excerpt: str) -> ProtocolRules:
+        title_match = re.search(r"TRIAL PROTOCOL EXCERPT\s+[—-]\s+([A-Z0-9-]+)", excerpt)
+        age_match = re.search(r"age (\d+)-(\d+) inclusive", excerpt)
+        window_match = re.search(r"Treatment must begin within (\d+) days", excerpt)
+        stage_match = re.search(r"Stage IV exception: treatment may begin within (\d+) days", excerpt)
+        sites_match = re.search(
+            r"Stage IV patients at (.+?) are a known high-risk outreach cohort",
+            excerpt,
         )
-        minority_total = total_control - dominant_count
-        minority_mortality = minority_deceased / minority_total if minority_total > 0 else 0
+        bias_match = re.search(
+            r"dominance exceeds (\d+)%, male share exceeds (\d+)%, "
+            r"and stage-adjusted mortality gap exceeds (\d+) percentage points",
+            excerpt,
+        )
 
-        male_control = sum(1 for r in control if r.get("gender") == "M")
-        male_ratio = male_control / total_control
+        high_risk_sites = []
+        if sites_match:
+            high_risk_sites = [site.strip() for site in sites_match.group(1).split(",")]
 
-        evidence = []
-        confidence = 0.0
+        bias_values = (100, 100, 100)
+        if bias_match:
+            bias_values = tuple(int(value) for value in bias_match.groups())
 
-        if representation_ratio >= self.REPRESENTATION_THRESHOLD:
-            evidence.append(f"Representation: {dominant_name}={representation_ratio:.0%} of control")
-            confidence += 0.4
-        if minority_deceased > 0:
-            evidence.append(f"Outcome disparity: minority mortality={minority_mortality:.0%}")
-            confidence += 0.2
-        if male_ratio >= 0.5:
-            evidence.append(f"Gender imbalance: male={male_ratio:.0%}")
-            confidence += 0.1
-        if max_disparity > self.OUTCOME_DISPARITY_THRESHOLD:
-            evidence.append(f"Statistically significant disparity: Δ={max_disparity:.0%}")
-            confidence += 0.15
+        if not age_match or not window_match or not stage_match:
+            raise ValueError("Unable to parse protocol excerpt.")
 
-        confidence = min(1.0, confidence)
+        return ProtocolRules(
+            protocol_title=(title_match.group(1) if title_match else "UNKNOWN"),
+            age_min=int(age_match.group(1)),
+            age_max=int(age_match.group(2)),
+            treatment_window_days=int(window_match.group(1)),
+            stage_iv_window_days=int(stage_match.group(1)),
+            high_risk_sites=high_risk_sites,
+            bias_control_dominance_threshold=bias_values[0] / 100.0,
+            bias_male_threshold=bias_values[1] / 100.0,
+            bias_stage_adjusted_gap=bias_values[2] / 100.0,
+        )
 
-        if confidence >= 0.6 and representation_ratio >= self.REPRESENTATION_THRESHOLD:
-            findings.append(Finding(
-                patient_id=None, error_type="selection_bias",
-                reason="Multi-dimensional selection bias: " + "; ".join(evidence),
-                confidence=confidence, risk="critical",
-                value=f"{dominant_name}={representation_ratio:.0%}",
-                statistical_context=f"Representation: {dominant_name}={representation_ratio:.0%} | Disparity: Δ={max_disparity:.0%} | Minority mortality: {minority_mortality:.0%}",
-            ))
 
+def parse_date(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(str(value), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+class AgeDetector:
+    def detect(self, dataset: list[dict], rules: ProtocolRules) -> list[Finding]:
+        findings = []
+        for row in dataset:
+            age = row.get("age")
+            if age is None or age < rules.age_min or age > rules.age_max:
+                findings.append(
+                    Finding(
+                        patient_id=row.get("patient_id"),
+                        error_type="invalid_age",
+                        reason=f"Age {age} violates protocol range {rules.age_min}-{rules.age_max}",
+                        confidence=0.98 if age is None or age < 0 or age > (rules.age_max + 10) else 0.94,
+                        risk="high",
+                    )
+                )
         return findings
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODULE 3: ACTION PLANNER
-# ═══════════════════════════════════════════════════════════════════════════
+class TemporalDetector:
+    def detect(self, dataset: list[dict]) -> list[Finding]:
+        findings = []
+        for row in dataset:
+            treatment = parse_date(row.get("treatment_start"))
+            death = parse_date(row.get("death_date"))
+            if treatment and death and death < treatment:
+                gap = (treatment - death).days
+                findings.append(
+                    Finding(
+                        patient_id=row.get("patient_id"),
+                        error_type="temporal_inconsistency",
+                        reason=f"death_date precedes treatment_start by {gap} days",
+                        confidence=min(1.0, 0.92 + gap / 500.0),
+                        risk="critical" if gap > 120 else "high",
+                    )
+                )
+        return findings
+
+
+class ProtocolWindowDetector:
+    def detect(self, dataset: list[dict], rules: ProtocolRules, ignore_stage_exception: bool = False) -> list[Finding]:
+        findings = []
+        for row in dataset:
+            enrollment = parse_date(row.get("enrollment_date"))
+            treatment = parse_date(row.get("treatment_start"))
+            if not enrollment or not treatment:
+                continue
+            allowed_days = rules.treatment_window_days if ignore_stage_exception else rules.allowed_window(row.get("stage", ""))
+            delay = (treatment - enrollment).days
+            if delay > allowed_days:
+                findings.append(
+                    Finding(
+                        patient_id=row.get("patient_id"),
+                        error_type="protocol_window_violation",
+                        reason=f"treatment started after {delay} days (allowed {allowed_days})",
+                        confidence=0.93 if delay > allowed_days + 3 else 0.82,
+                        risk="high",
+                    )
+                )
+        return findings
+
+
+class BiasAnalyzer:
+    @staticmethod
+    def summarize_control(dataset: list[dict]) -> tuple[list[dict], str, float, float, float]:
+        control = [row for row in dataset if row.get("group") == "control"]
+        if not control:
+            return [], "Unknown", 0.0, 0.0, 0.0
+
+        counts = Counter(row.get("ethnicity", "Unknown") for row in control)
+        dominant_ethnicity, dominant_count = counts.most_common(1)[0]
+        dominant_ratio = dominant_count / len(control)
+        male_ratio = sum(row.get("gender") == "M" for row in control) / len(control)
+
+        dominant_group = [row for row in control if row.get("ethnicity") == dominant_ethnicity]
+        minority_group = [row for row in control if row.get("ethnicity") != dominant_ethnicity]
+        dom_mortality = (
+            sum(row.get("outcome") == "deceased" for row in dominant_group) / len(dominant_group)
+            if dominant_group
+            else 0.0
+        )
+        min_mortality = (
+            sum(row.get("outcome") == "deceased" for row in minority_group) / len(minority_group)
+            if minority_group
+            else 0.0
+        )
+        overall_gap = min_mortality - dom_mortality
+        return control, dominant_ethnicity, dominant_ratio, male_ratio, overall_gap
+
+    @staticmethod
+    def stage_adjusted_gap(control: list[dict], dominant_ethnicity: str) -> float:
+        weighted_gap = 0.0
+        total_weight = 0
+        for stage in ("I", "II", "III", "IV"):
+            stage_rows = [row for row in control if row.get("stage") == stage]
+            dominant_rows = [row for row in stage_rows if row.get("ethnicity") == dominant_ethnicity]
+            minority_rows = [row for row in stage_rows if row.get("ethnicity") != dominant_ethnicity]
+            if len(dominant_rows) < 5 or len(minority_rows) < 5:
+                continue
+            dominant_mortality = sum(row.get("outcome") == "deceased" for row in dominant_rows) / len(dominant_rows)
+            minority_mortality = sum(row.get("outcome") == "deceased" for row in minority_rows) / len(minority_rows)
+            weight = len(stage_rows)
+            weighted_gap += (minority_mortality - dominant_mortality) * weight
+            total_weight += weight
+        return weighted_gap / total_weight if total_weight else 0.0
+
+    def detect_full(self, dataset: list[dict], rules: ProtocolRules) -> list[Finding]:
+        control, dominant_ethnicity, dominant_ratio, male_ratio, overall_gap = self.summarize_control(dataset)
+        if not control:
+            return []
+        adjusted_gap = self.stage_adjusted_gap(control, dominant_ethnicity)
+        if (
+            dominant_ratio >= rules.bias_control_dominance_threshold
+            and male_ratio >= rules.bias_male_threshold
+            and adjusted_gap >= rules.bias_stage_adjusted_gap
+        ):
+            return [
+                Finding(
+                    patient_id=None,
+                    error_type="selection_bias",
+                    reason=(
+                        f"Control-arm skew detected: {dominant_ethnicity}={dominant_ratio:.0%}, "
+                        f"male={male_ratio:.0%}, stage-adjusted mortality gap={adjusted_gap:.0%}"
+                    ),
+                    confidence=0.92,
+                    risk="critical",
+                    evidence=f"overall gap={overall_gap:.0%}",
+                )
+            ]
+        return []
+
+    def detect_heuristic(self, dataset: list[dict], rules: ProtocolRules) -> list[Finding]:
+        control, dominant_ethnicity, dominant_ratio, male_ratio, overall_gap = self.summarize_control(dataset)
+        if not control:
+            return []
+        loose_threshold = max(0.10, rules.bias_stage_adjusted_gap - 0.04)
+        if dominant_ratio >= max(0.55, rules.bias_control_dominance_threshold - 0.07) and overall_gap >= loose_threshold:
+            return [
+                Finding(
+                    patient_id=None,
+                    error_type="selection_bias",
+                    reason=(
+                        f"Heuristic bias concern: {dominant_ethnicity}={dominant_ratio:.0%}, "
+                        f"male={male_ratio:.0%}, overall mortality gap={overall_gap:.0%}"
+                    ),
+                    confidence=0.74,
+                    risk="high",
+                )
+            ]
+        return []
+
 
 class ActionPlanner:
-    """Plans optimal action sequence adapted to task type and step budget."""
+    def plan(
+        self,
+        task_id: str,
+        findings: list[Finding],
+        max_steps: int,
+        extra_investigations: Optional[list[str]] = None,
+    ) -> list[AuditAction]:
+        spec = TASK_SPECS[task_id]
+        actions: list[AuditAction] = []
 
-    def plan(self, findings: list[Finding], task_type: str,
-             max_steps: int = 20) -> list[AuditAction]:
-        actions = []
+        investigations = list(spec["investigations"])
+        distributions = list(spec["distributions"])
+        if extra_investigations:
+            investigations.extend(extra_investigations)
 
-        # Phase 1: Investigation (3 steps)
-        investigate = ["age", "death_date", "ethnicity"]
-        for var in investigate:
-            actions.append(AuditAction(action_type="investigate_pattern", variable=var))
+        for variable in investigations:
+            actions.append(AuditAction(action_type="investigate_pattern", variable=variable))
+        for variable in distributions:
+            actions.append(AuditAction(action_type="compute_distribution", variable=variable))
 
-        # Phase 2: Flag findings by priority
-        data_findings = [f for f in findings if f.error_type != "selection_bias"]
-        bias_findings = [f for f in findings if f.error_type == "selection_bias"]
+        record_findings = [finding for finding in findings if finding.error_type != "selection_bias"]
+        bias_findings = [finding for finding in findings if finding.error_type == "selection_bias"]
+        record_findings.sort(key=lambda finding: -finding.priority_score)
 
-        data_findings.sort(key=lambda f: -f.priority_score)
-
-        bias_slots = 1 if (bias_findings and task_type == "comprehensive_audit") else 0
-        max_data_flags = max_steps - len(investigate) - 1 - bias_slots
-
-        flagged = set()
-        for f in data_findings[:max_data_flags]:
-            if f.patient_id in flagged:
+        max_flag_slots = max_steps - len(actions) - 1 - (1 if bias_findings else 0)
+        flagged_ids = set()
+        for finding in record_findings[:max_flag_slots]:
+            if not finding.patient_id or finding.patient_id in flagged_ids:
                 continue
-            flagged.add(f.patient_id)
-            actions.append(AuditAction(
-                action_type="flag_error",
-                patient_id=f.patient_id,
-                error_type=f.error_type,
-                reason=f.reason,
-            ))
+            flagged_ids.add(finding.patient_id)
+            actions.append(
+                AuditAction(
+                    action_type="flag_error",
+                    patient_id=finding.patient_id,
+                    error_type=finding.error_type,
+                    reason=finding.reason,
+                    confidence=finding.confidence,
+                )
+            )
 
-        if bias_findings and task_type == "comprehensive_audit":
-            actions.append(AuditAction(
-                action_type="flag_error",
-                error_type="selection_bias",
-                reason=bias_findings[0].reason,
-            ))
+        if bias_findings:
+            bias = bias_findings[0]
+            actions.append(
+                AuditAction(
+                    action_type="flag_error",
+                    error_type="selection_bias",
+                    reason=bias.reason,
+                    confidence=bias.confidence,
+                )
+            )
 
         return actions
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODULE 4: LLM REASONING LAYER
-# ═══════════════════════════════════════════════════════════════════════════
+def generate_expert_report(
+    client: Optional[OpenAI],
+    rules: ProtocolRules,
+    findings: list[Finding],
+    task_name: str,
+) -> str:
+    finding_lines = []
+    for finding in findings[:8]:
+        if finding.patient_id:
+            finding_lines.append(f"- {finding.patient_id}: {finding.error_type} | {finding.reason}")
+        else:
+            finding_lines.append(f"- {finding.error_type}: {finding.reason}")
 
-def generate_expert_report(client, findings: list[Finding],
-                           profiles: dict, task_type: str) -> str:
-    """LLM generates expert audit report from pre-analyzed findings."""
-    age_f = [f for f in findings if f.error_type == "invalid_age"]
-    temp_f = [f for f in findings if f.error_type == "temporal_inconsistency"]
-    bias_f = [f for f in findings if f.error_type == "selection_bias"]
-    age_p = profiles.get("age", {})
-
-    sections = [
-        f"AUDIT ANALYSIS — Task: {task_type}",
-        f"Dataset: {age_p.get('valid_count', 0) + age_p.get('null_count', 0)} patients",
-        f"Age: median={age_p.get('median', '?')}, range=[{age_p.get('min', '?')}, {age_p.get('max', '?')}]",
-        "", "ISSUES:",
-    ]
-
-    if age_f:
-        sections.append(f"• {len(age_f)} age anomalies")
-        for f in age_f[:3]:
-            sections.append(f"  - {f.patient_id}: age={f.value}")
-    if temp_f:
-        sections.append(f"• {len(temp_f)} temporal violations")
-        for f in temp_f[:3]:
-            sections.append(f"  - {f.patient_id}: {f.value}")
-    if bias_f:
-        sections.append(f"• Selection bias: {bias_f[0].statistical_context}")
-
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a Senior Clinical Data Manager writing a formal audit report. "
-                        "Provide: 1) SUMMARY with severity, 2) ROOT CAUSE analysis, "
-                        "3) RISK ASSESSMENT (impact on trial validity), "
-                        "4) RECOMMENDED corrective actions, "
-                        "5) REGULATORY compliance impact. "
-                        "Be concise (max 150 words). Use professional clinical language."
-                    ),
-                },
-                {"role": "user", "content": "\n".join(sections)},
-            ],
-            max_tokens=250,
-            temperature=0,
-        )
-        report = completion.choices[0].message.content or ""
-        if "recommend" not in report.lower():
-            report += "\nRecommend immediate corrective action for all identified issues."
-        return report
-    except Exception as e:
-        # Deterministic fallback
-        severity = "CRITICAL" if bias_f else "HIGH" if temp_f else "MEDIUM"
-        parts = [
-            f"CLINICAL DATA AUDIT REPORT — {task_type.replace('_', ' ').title()}",
-            f"\nSUMMARY: {len(findings)} data quality issues identified.",
+    prompt = "\n".join(
+        [
+            f"Protocol: {rules.protocol_title}",
+            f"Task: {task_name}",
+            f"Key rules: age {rules.age_min}-{rules.age_max}, "
+            f"standard start <= {rules.treatment_window_days} days, "
+            f"stage IV <= {rules.stage_iv_window_days} days.",
+            "",
+            "Findings:",
+            *finding_lines,
+            "",
+            "Write a concise audit report with protocol grounding, root cause, risk, corrective actions, "
+            "and fairness reasoning when relevant.",
         ]
-        if age_f:
-            parts.append(f"\nAGE ANOMALIES ({len(age_f)}): Root cause: data entry errors or ETL pipeline failures.")
-        if temp_f:
-            parts.append(f"\nTEMPORAL VIOLATIONS ({len(temp_f)}): Root cause: date field mapping errors.")
-        if bias_f:
-            parts.append(f"\nSELECTION BIAS: {bias_f[0].statistical_context}.")
-        parts.append(f"\nRISK LEVEL: {severity}. Recommend immediate corrective action: "
-                     "quarantine affected records, audit data entry workflows, implement validation "
-                     "rules, and rebalance demographic representation in control group. "
-                     "This impacts regulatory compliance with FDA 21 CFR Part 11 and ICH-GCP guidelines.")
-        return "\n".join(parts)
+    )
 
+    if client is not None:
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a senior clinical data manager. Produce a concise report "
+                            "with protocol grounding, root cause, risk, corrective action, and "
+                            "fairness reasoning when applicable."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=240,
+            )
+            content = completion.choices[0].message.content or ""
+            if content:
+                return content
+        except Exception:
+            pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODULE 5: METRICS TRACKER
-# ═══════════════════════════════════════════════════════════════════════════
+    if any(finding.error_type == "selection_bias" for finding in findings):
+        fairness_line = (
+            "Fairness review: control-arm patterns were reviewed with stage-adjusted comparisons "
+            "before escalating the bias conclusion."
+        )
+    else:
+        fairness_line = (
+            "Fairness review: no actionable control-arm bias was confirmed after stage-adjusted review."
+        )
+
+    return (
+        f"Protocol-grounded audit for {rules.protocol_title}. Root cause analysis indicates site-level "
+        f"data capture and scheduling control weaknesses. Risk assessment: protocol compliance and endpoint "
+        f"validity are affected. Recommended corrective actions include quarantining impacted records, "
+        f"tightening enrollment-to-treatment validations, and retraining site coordinators. {fairness_line}"
+    )
+
 
 class MetricsTracker:
     def __init__(self):
@@ -461,123 +432,176 @@ class MetricsTracker:
         self.steps = 0
         self.llm_calls = 0
 
-    def record(self, feedback: str):
+    def record(self, feedback: str) -> None:
         self.total_flagged += 1
-        if "Correct" in feedback or "✓" in feedback:
+        if "✓" in feedback or "Correct" in feedback:
             self.true_pos += 1
-        elif "False positive" in feedback or "REJECTED" in feedback or "✗" in feedback:
+        elif "✗" in feedback or "REJECTED" in feedback:
             self.false_pos += 1
 
     @property
     def precision(self) -> float:
-        return self.true_pos / self.total_flagged if self.total_flagged else 0
+        return self.true_pos / self.total_flagged if self.total_flagged else 0.0
 
     def summary(self) -> str:
         return (
-            f"  📊 Metrics: {self.true_pos}/{self.total_flagged} correct "
-            f"(precision={self.precision:.0%}) | "
-            f"{self.steps} steps | {self.llm_calls} LLM call(s)"
+            f"  Metrics: {self.true_pos}/{self.total_flagged} correct "
+            f"(precision={self.precision:.0%}) | {self.steps} steps | {self.llm_calls} LLM call(s)"
         )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# AGENT MODE 1: NAIVE LLM (raw prompt, no statistical tools)
-# ═══════════════════════════════════════════════════════════════════════════
+class InProcessEnvSession:
+    def __init__(self):
+        if ClinicalTrialAuditorEnvironment is None:
+            raise RuntimeError("In-process environment is unavailable.")
+        self._env = ClinicalTrialAuditorEnvironment()
 
-def run_naive_task(client, task_id: str, task_name: str):
-    """
-    Naive agent: sends raw data to LLM, asks it to find errors.
-    No statistical analysis, no planning. Expected score: ~0.25-0.40
-    """
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def reset(self, **kwargs):
+        observation = self._env.reset(**kwargs)
+        return SimpleNamespace(observation=observation, reward=observation.reward, done=observation.done)
+
+    def step(self, action: AuditAction):
+        observation = self._env.step(action)
+        return SimpleNamespace(observation=observation, reward=observation.reward, done=observation.done)
+
+
+def open_env_session():
+    if ENV_BASE_URL.lower() == "inprocess":
+        return InProcessEnvSession()
+    return ClinicalTrialAuditorEnv(base_url=ENV_BASE_URL).sync()
+
+
+def run_naive_task(client: Optional[OpenAI], task_id: str, task_name: str, seed: int):
     print(f"\n  Task: {task_name}")
-    print("  " + "-" * 50)
-
+    print("  " + "-" * 54)
     metrics = MetricsTracker()
     final_score = 0.0
 
-    with ClinicalTrialAuditorEnv(base_url=ENV_BASE_URL).sync() as env:
-        result = env.reset(task_id=task_id, seed=BASELINE_SEED)
+    with open_env_session() as env:
+        result = env.reset(task_id=task_id, seed=seed)
         obs = result.observation.model_dump()
         dataset = obs["dataset"]
-        task_type = obs["task_type"]
+        protocol_excerpt = obs["trial_protocol_excerpt"]
         max_steps = obs["attempts_remaining"]
-        print(f"  Patients: {len(dataset)} | Max steps: {max_steps}")
+        rules = ProtocolParser.parse(protocol_excerpt)
+        print(f"  Protocol: {rules.protocol_title} | Patients: {len(dataset)} | Max steps: {max_steps}")
 
-        # Send first 30 patients to LLM (token limit)
-        sample = dataset[:30]
-        sample_str = json.dumps(sample, indent=1, default=str)
+        sample = dataset[:24]
+        guessed_findings: list[Finding] = []
 
-        try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a clinical data auditor. Find errors in patient data."
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Here are {len(sample)} patient records from a clinical trial. "
-                            f"Find ALL data quality issues.\n"
-                            f"For each issue, respond with ONE line: PATIENT_ID|ERROR_TYPE|REASON\n"
-                            f"ERROR_TYPE must be: invalid_age OR temporal_inconsistency\n"
-                            f"Valid age range: 18-120. Death date must not precede treatment start.\n\n"
-                            f"{sample_str}"
-                        ),
-                    },
-                ],
-                max_tokens=500,
-                temperature=0,
+        if client is not None:
+            try:
+                completion = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are auditing patient records from a clinical trial. "
+                                "Return one issue per line as PATIENT_ID|ERROR_TYPE|REASON."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Protocol excerpt:\n{protocol_excerpt}\n\n"
+                                f"Review only these {len(sample)} records:\n{json.dumps(sample, default=str)}\n\n"
+                                "Allowed ERROR_TYPE values: invalid_age, temporal_inconsistency, "
+                                "protocol_window_violation, selection_bias."
+                            ),
+                        },
+                    ],
+                    temperature=0,
+                    max_tokens=450,
+                )
+                metrics.llm_calls += 1
+                lines = (completion.choices[0].message.content or "").splitlines()
+                for line in lines:
+                    parts = [part.strip() for part in line.split("|")]
+                    if len(parts) >= 2:
+                        guessed_findings.append(
+                            Finding(
+                                patient_id=parts[0] if parts[0] and parts[0] != "None" else None,
+                                error_type=parts[1],
+                                reason=parts[2] if len(parts) > 2 else "LLM guess",
+                                confidence=0.65,
+                            )
+                        )
+            except Exception as exc:
+                print(f"  LLM error: {exc}")
+
+        if not guessed_findings:
+            for row in sample:
+                age = row.get("age")
+                treatment = parse_date(row.get("treatment_start"))
+                death = parse_date(row.get("death_date"))
+                enrollment = parse_date(row.get("enrollment_date"))
+                if age is None or age < 0 or age > 120:
+                    guessed_findings.append(
+                        Finding(
+                            patient_id=row.get("patient_id"),
+                            error_type="invalid_age",
+                            reason="Sample-level obvious age anomaly",
+                            confidence=0.55,
+                        )
+                    )
+                if treatment and death and death < treatment:
+                    guessed_findings.append(
+                        Finding(
+                            patient_id=row.get("patient_id"),
+                            error_type="temporal_inconsistency",
+                            reason="Sample-level temporal anomaly",
+                            confidence=0.60,
+                        )
+                    )
+        plan_actions = []
+        for variable in TASK_SPECS[task_id]["investigations"]:
+            plan_actions.append(AuditAction(action_type="investigate_pattern", variable=variable))
+        if task_id == "task_hard":
+            plan_actions.extend(
+                AuditAction(action_type="compute_distribution", variable=variable)
+                for variable in TASK_SPECS[task_id]["distributions"]
             )
-            llm_response = completion.choices[0].message.content or ""
-            metrics.llm_calls += 1
-        except Exception as e:
-            print(f"  LLM Error: {e}")
-            llm_response = ""
 
-        # Investigate (required phase gate)
-        for var in ["age", "death_date", "ethnicity"]:
-            if result.done:
-                break
-            result = env.step(AuditAction(action_type="investigate_pattern", variable=var))
-            metrics.steps += 1
-
-        # Parse LLM response and flag
-        lines = llm_response.strip().split("\n")
-        for line in lines:
-            if result.done:
-                break
-            parts = line.strip().split("|")
-            if len(parts) >= 2:
-                pid = parts[0].strip()
-                etype = parts[1].strip().lower().replace(" ", "_")
-                if etype not in ("invalid_age", "temporal_inconsistency"):
-                    continue
-                # Check if this patient_id exists
-                if not any(p.get("patient_id") == pid for p in dataset):
-                    continue
-                result = env.step(AuditAction(
+        max_flag_slots = max_steps - len(plan_actions) - 1
+        for finding in guessed_findings[:max_flag_slots]:
+            plan_actions.append(
+                AuditAction(
                     action_type="flag_error",
-                    patient_id=pid,
-                    error_type=etype,
-                    reason=parts[2].strip() if len(parts) > 2 else "LLM detected",
-                ))
-                obs = result.observation.model_dump()
-                final_score = obs["score_so_far"]
-                metrics.record(obs["feedback"])
-                metrics.steps += 1
+                    patient_id=finding.patient_id,
+                    error_type=finding.error_type,
+                    reason=finding.reason,
+                    confidence=finding.confidence,
+                )
+            )
 
-        # Submit report
+        for action in plan_actions:
+            if result.done:
+                break
+            result = env.step(action)
+            obs = result.observation.model_dump()
+            final_score = obs["score_so_far"]
+            metrics.steps += 1
+            if action.action_type == "flag_error":
+                metrics.record(obs["feedback"])
+
         if not result.done:
-            result = env.step(AuditAction(
-                action_type="submit_report",
-                report=(
-                    "Clinical data audit report. Issues found in patient ages and temporal "
-                    "sequences. Recommend corrective action for data entry validation. "
-                    "Risk assessment: HIGH. Impact on regulatory compliance noted."
-                ),
-            ))
+            result = env.step(
+                AuditAction(
+                    action_type="submit_report",
+                    report=(
+                        f"Protocol grounding for {rules.protocol_title}. "
+                        "Sample review found possible age and timing issues. "
+                        "Recommend manual review and corrective action."
+                    ),
+                )
+            )
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
             metrics.steps += 1
@@ -586,302 +610,222 @@ def run_naive_task(client, task_id: str, task_name: str):
     return final_score, metrics
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# AGENT MODE 2: HEURISTIC (simple rules, no LLM)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_heuristic_task(client_unused, task_id: str, task_name: str):
-    """
-    Heuristic agent: simple threshold rules, no LLM.
-    Catches obvious errors but falls for traps. Expected score: ~0.45-0.60
-    """
+def run_heuristic_task(client_unused: Optional[OpenAI], task_id: str, task_name: str, seed: int):
     print(f"\n  Task: {task_name}")
-    print("  " + "-" * 50)
-
+    print("  " + "-" * 54)
     metrics = MetricsTracker()
     final_score = 0.0
 
-    with ClinicalTrialAuditorEnv(base_url=ENV_BASE_URL).sync() as env:
-        result = env.reset(task_id=task_id, seed=BASELINE_SEED)
+    with open_env_session() as env:
+        result = env.reset(task_id=task_id, seed=seed)
         obs = result.observation.model_dump()
         dataset = obs["dataset"]
-        task_type = obs["task_type"]
+        rules = ProtocolParser.parse(obs["trial_protocol_excerpt"])
         max_steps = obs["attempts_remaining"]
-        print(f"  Patients: {len(dataset)} | Max steps: {max_steps}")
+        print(f"  Protocol: {rules.protocol_title} | Patients: {len(dataset)} | Max steps: {max_steps}")
 
-        # Investigate
-        for var in ["age", "death_date", "ethnicity"]:
-            if result.done:
-                break
-            result = env.step(AuditAction(action_type="investigate_pattern", variable=var))
-            metrics.steps += 1
+        actions: list[AuditAction] = []
+        for variable in TASK_SPECS[task_id]["investigations"]:
+            actions.append(AuditAction(action_type="investigate_pattern", variable=variable))
+        for variable in TASK_SPECS[task_id]["distributions"]:
+            actions.append(AuditAction(action_type="compute_distribution", variable=variable))
 
-        step_budget = max_steps - metrics.steps - 1  # Reserve 1 for report
-        flags_made = 0
+        findings = []
+        for row in dataset:
+            age = row.get("age")
+            if age is None or age < (rules.age_min - 3) or age > (rules.age_max + 3):
+                findings.append(
+                    Finding(
+                        patient_id=row.get("patient_id"),
+                        error_type="invalid_age",
+                        reason=f"Heuristic age screen triggered on {age}",
+                        confidence=0.82,
+                        risk="high",
+                    )
+                )
+        findings.extend(TemporalDetector().detect(dataset))
+        if task_id in {"task_medium", "task_hard"}:
+            findings.extend(ProtocolWindowDetector().detect(dataset, rules, ignore_stage_exception=True))
+        if task_id == "task_hard":
+            findings.extend(BiasAnalyzer().detect_heuristic(dataset, rules))
 
-        # Simple age check — catches most but may false-positive on boundaries
-        for p in dataset:
-            if flags_made >= step_budget or result.done:
-                break
-            age = p.get("age")
-            pid = p.get("patient_id")
-
-            # BUG: heuristic uses < 18 instead of < 18, catching age=18 incorrectly? No.
-            # BUG: heuristic uses > 100 instead of > 120, missing ages 101-120 OR
-            # flagging valid old patients
-            if age is None or age < 18 or age > 100:  # Deliberately wrong threshold
-                result = env.step(AuditAction(
-                    action_type="flag_error",
-                    patient_id=pid,
-                    error_type="invalid_age",
-                    reason=f"Age {age} outside expected range",
-                ))
-                obs = result.observation.model_dump()
-                final_score = obs["score_so_far"]
-                metrics.record(obs["feedback"])
-                metrics.steps += 1
-                flags_made += 1
-
-        # Simple temporal check (if applicable)
-        if task_type in ("temporal_consistency", "comprehensive_audit"):
-            for p in dataset:
-                if flags_made >= step_budget or result.done:
-                    break
-                ts = p.get("treatment_start")
-                dd = p.get("death_date")
-                if ts and dd:
-                    try:
-                        t = datetime.strptime(ts, "%Y-%m-%d")
-                        d = datetime.strptime(dd, "%Y-%m-%d")
-                        # BUG: heuristic flags ANY death within 7 days (catches traps)
-                        if d < t or (d - t).days < 7:
-                            pid = p.get("patient_id")
-                            result = env.step(AuditAction(
-                                action_type="flag_error",
-                                patient_id=pid,
-                                error_type="temporal_inconsistency",
-                                reason=f"Suspicious temporal sequence",
-                            ))
-                            obs = result.observation.model_dump()
-                            final_score = obs["score_so_far"]
-                            metrics.record(obs["feedback"])
-                            metrics.steps += 1
-                            flags_made += 1
-                    except ValueError:
-                        pass
-
-        # Submit report
-        if not result.done:
-            result = env.step(AuditAction(
-                action_type="submit_report",
-                report="Audit complete. Found age and temporal issues. Action recommended.",
-            ))
-            obs = result.observation.model_dump()
-            final_score = obs["score_so_far"]
-            metrics.steps += 1
-
-    print(metrics.summary())
-    return final_score, metrics
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# AGENT MODE 3: FULL AGENTIC PIPELINE
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_full_task(client, task_id: str, task_name: str):
-    """
-    Full agent: Statistical detection + LLM reasoning.
-    Expected score: ~0.85-0.95
-    """
-    print(f"\n  Task: {task_name}")
-    print("  " + "-" * 50)
-
-    metrics = MetricsTracker()
-    final_score = 0.0
-
-    with ClinicalTrialAuditorEnv(base_url=ENV_BASE_URL).sync() as env:
-        result = env.reset(task_id=task_id, seed=BASELINE_SEED)
-        obs = result.observation.model_dump()
-        dataset = obs["dataset"]
-        task_type = obs["task_type"]
-        max_steps = obs["attempts_remaining"]
-        print(f"  Type: {task_type} | Patients: {len(dataset)} | Max steps: {max_steps}")
-
-        # 1. PROFILE
-        profiler = DataProfiler(dataset)
-        profiles = profiler.profile_all()
-        ap = profiles.get("age", {})
-        print(f"  Profile: age median={ap.get('median','?')}, "
-              f"range=[{ap.get('min','?')}-{ap.get('max','?')}], "
-              f"nulls={ap.get('null_count',0)}")
-
-        # 2. DETECT
-        all_findings = []
-        all_findings.extend(AgeAnomalyDetector().detect(dataset, profiles))
-        if task_type in ("temporal_consistency", "comprehensive_audit"):
-            all_findings.extend(TemporalConsistencyDetector().detect(dataset, profiles))
-        if task_type == "comprehensive_audit":
-            all_findings.extend(SelectionBiasDetector().detect(dataset, profiles))
-
-        age_n = sum(1 for f in all_findings if f.error_type == "invalid_age")
-        temp_n = sum(1 for f in all_findings if f.error_type == "temporal_inconsistency")
-        bias_n = sum(1 for f in all_findings if f.error_type == "selection_bias")
-        print(f"  Detected: {age_n} age | {temp_n} temporal | {bias_n} bias")
-
-        # 3. PLAN
         planner = ActionPlanner()
-        actions = planner.plan(all_findings, task_type, max_steps=max_steps)
+        planned_flags = planner.plan(task_id, findings, max_steps=max_steps)
+        actions = planned_flags
 
-        # 4. REASON (1 LLM call for report)
-        report_text = generate_expert_report(client, all_findings, profiles, task_type)
-        metrics.llm_calls += 1
-
-        # 5. EXECUTE
-        step = 0
         for action in actions:
             if result.done:
                 break
             result = env.step(action)
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
-            feedback = obs["feedback"]
-            step += 1
-            metrics.steps = step
+            metrics.steps += 1
             if action.action_type == "flag_error":
-                metrics.record(feedback)
-            # Print progress every 5 steps or for flags
-            if action.action_type == "flag_error" or step <= 3:
-                print(f"  Step {step}: score={final_score:.2f} | {feedback[:65]}")
+                metrics.record(obs["feedback"])
 
-        # 6. REPORT
         if not result.done:
-            result = env.step(AuditAction(action_type="submit_report", report=report_text))
+            result = env.step(
+                AuditAction(
+                    action_type="submit_report",
+                    report=(
+                        f"Protocol review for {rules.protocol_title}. Root cause is likely data-entry drift. "
+                        "Recommend validation checks and operational follow-up. Risk is moderate to high."
+                    ),
+                )
+            )
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
-            step += 1
-            metrics.steps = step
-            print(f"  Step {step}: score={final_score:.2f} | Report submitted")
+            metrics.steps += 1
 
     print(metrics.summary())
     return final_score, metrics
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ORCHESTRATOR
-# ═══════════════════════════════════════════════════════════════════════════
+def run_full_task(client: Optional[OpenAI], task_id: str, task_name: str, seed: int):
+    print(f"\n  Task: {task_name}")
+    print("  " + "-" * 54)
+    metrics = MetricsTracker()
+    final_score = 0.0
 
-TASK_LIST = {
-    "task_easy": "Syntactic Cleaning (Easy)",
-    "task_medium": "Temporal Consistency (Medium)",
-    "task_hard": "Equity Bias Audit (Hard)",
-}
+    with open_env_session() as env:
+        result = env.reset(task_id=task_id, seed=seed)
+        obs = result.observation.model_dump()
+        dataset = obs["dataset"]
+        rules = ProtocolParser.parse(obs["trial_protocol_excerpt"])
+        max_steps = obs["attempts_remaining"]
+        print(f"  Protocol: {rules.protocol_title} | Patients: {len(dataset)} | Max steps: {max_steps}")
+        print(
+            f"  Rules: age {rules.age_min}-{rules.age_max} | standard <= {rules.treatment_window_days}d | "
+            f"stage IV <= {rules.stage_iv_window_days}d"
+        )
+
+        findings = []
+        findings.extend(AgeDetector().detect(dataset, rules))
+        findings.extend(TemporalDetector().detect(dataset))
+        if task_id in {"task_medium", "task_hard"}:
+            findings.extend(ProtocolWindowDetector().detect(dataset, rules, ignore_stage_exception=False))
+        if task_id == "task_hard":
+            findings.extend(BiasAnalyzer().detect_full(dataset, rules))
+
+        age_count = sum(f.error_type == "invalid_age" for f in findings)
+        temporal_count = sum(f.error_type == "temporal_inconsistency" for f in findings)
+        window_count = sum(f.error_type == "protocol_window_violation" for f in findings)
+        bias_count = sum(f.error_type == "selection_bias" for f in findings)
+        print(
+            f"  Detected: age={age_count} | temporal={temporal_count} | "
+            f"window={window_count} | bias={bias_count}"
+        )
+
+        extra_checks = {
+            "task_easy": ["enrollment_date", "stage", "group", "treatment_site", "country"],
+            "task_medium": ["group", "treatment_site", "outcome", "country", "drug"],
+            "task_hard": ["treatment_site", "group", "country", "drug", "trial_phase"],
+        }.get(task_id, [])
+        actions = ActionPlanner().plan(task_id, findings, max_steps=max_steps, extra_investigations=extra_checks)
+        report = generate_expert_report(client, rules, findings, task_name)
+        if client is not None:
+            metrics.llm_calls += 1
+
+        for action in actions:
+            if result.done:
+                break
+            result = env.step(action)
+            obs = result.observation.model_dump()
+            final_score = obs["score_so_far"]
+            metrics.steps += 1
+            if action.action_type == "flag_error":
+                metrics.record(obs["feedback"])
+            if action.action_type == "flag_error" or metrics.steps <= 5:
+                print(f"  Step {metrics.steps}: score={final_score:.2f} | {obs['feedback'][:80]}")
+
+        if not result.done:
+            result = env.step(AuditAction(action_type="submit_report", report=report))
+            obs = result.observation.model_dump()
+            final_score = obs["score_so_far"]
+            metrics.steps += 1
+            print(f"  Step {metrics.steps}: score={final_score:.2f} | report submitted")
+
+    print(metrics.summary())
+    return final_score, metrics
 
 
-def run_agent(mode: str, client):
-    """Run one agent mode across all tasks."""
+def run_agent(mode: str, client: Optional[OpenAI], seed: int):
     runner = {
         "naive": run_naive_task,
         "heuristic": run_heuristic_task,
         "full": run_full_task,
     }[mode]
 
-    scores, all_metrics = [], []
-    t0 = time.time()
-
-    for tid, tname in TASK_LIST.items():
-        score, m = runner(client, tid, tname)
+    scores = []
+    metrics_list = []
+    start = time.time()
+    for task_id, task_name in TASK_LIST.items():
+        score, metrics = runner(client, task_id, task_name, seed)
         scores.append(score)
-        all_metrics.append(m)
-        print(f"  ✓ Final: {score:.2f}\n")
-
-    elapsed = time.time() - t0
-    avg = sum(scores) / len(scores)
-    total_steps = sum(m.steps for m in all_metrics)
-    total_llm = sum(m.llm_calls for m in all_metrics)
-    avg_prec = statistics.mean(m.precision for m in all_metrics) if all_metrics else 0
+        metrics_list.append(metrics)
+        print(f"  Final score: {score:.2f}\n")
 
     return {
         "mode": mode,
         "scores": dict(zip(TASK_LIST.keys(), scores)),
-        "average": avg,
-        "elapsed": elapsed,
-        "total_steps": total_steps,
-        "total_llm": total_llm,
-        "avg_precision": avg_prec,
+        "average": sum(scores) / len(scores),
+        "elapsed": time.time() - start,
+        "total_steps": sum(metric.steps for metric in metrics_list),
+        "total_llm": sum(metric.llm_calls for metric in metrics_list),
+        "avg_precision": statistics.mean(metric.precision for metric in metrics_list),
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Clinical Trial Auditor Baseline Inference")
-    parser.add_argument("--mode", choices=["naive", "heuristic", "full", "all"],
-                        default="full", help="Agent mode (default: full)")
+    parser = argparse.ArgumentParser(description="Clinical Trial Auditor baseline inference")
+    parser.add_argument("--mode", choices=["naive", "heuristic", "full", "all"], default="full")
+    parser.add_argument("--seed", type=int, default=BASELINE_SEED)
     args = parser.parse_args()
 
-    # Only create LLM client when needed (heuristic mode doesn't use LLM)
-    needs_llm = args.mode in ("naive", "full", "all")
-    if needs_llm:
-        api_key = API_KEY or os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            print("WARNING: No API key found. Set HF_TOKEN, API_KEY, or OPENAI_API_KEY.")
-            print("         Falling back to heuristic mode.")
-            args.mode = "heuristic"
-            client = None
-        else:
-            client = OpenAI(base_url=API_BASE_URL, api_key=api_key)
-    else:
-        client = None
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if API_KEY else None
 
-    print("=" * 65)
-    print("  Clinical Trial Auditor — Baseline Inference")
-    print("  Procedural Dataset Generation | Adversarial Traps | Seed-Reproducible")
+    print("=" * 70)
+    print("  Clinical Trial Auditor — Protocol-Aware Baseline Inference")
+    print("  Dynamic Rules | Adversarial Traps | Stage-Adjusted Fairness Review")
     print(f"  Model: {MODEL_NAME}")
-    print(f"  Seed: {BASELINE_SEED}")
-    print("=" * 65)
+    print(f"  Seed:  {args.seed}")
+    print("=" * 70)
+    if client is None:
+        print("  Note: no API key detected. Naive/full report generation will use deterministic fallbacks.")
 
-    if args.mode == "all":
-        modes = ["naive", "heuristic", "full"]
-    else:
-        modes = [args.mode]
-
-    all_results = []
+    modes = ["naive", "heuristic", "full"] if args.mode == "all" else [args.mode]
+    results = []
     for mode in modes:
-        print(f"\n{'═' * 65}")
+        print(f"\n{'═' * 70}")
         print(f"  AGENT: {mode.upper()}")
-        print(f"{'═' * 65}")
-        result = run_agent(mode, client)
-        all_results.append(result)
+        print(f"{'═' * 70}")
+        results.append(run_agent(mode, client, args.seed))
 
-    # ── Final Report ──
-    print("\n" + "=" * 65)
+    print("\n" + "=" * 70)
     print("  BENCHMARK RESULTS")
-    print("=" * 65)
-
-    if len(all_results) > 1:
-        # Multi-agent comparison table
-        header = f"  {'Agent':<15} {'Easy':>8} {'Medium':>8} {'Hard':>8} {'Avg':>8} {'Prec':>8} {'Time':>8}"
+    print("=" * 70)
+    if len(results) > 1:
+        header = f"  {'Agent':<12} {'Easy':>8} {'Medium':>8} {'Hard':>8} {'Avg':>8} {'Prec':>8} {'Time':>8}"
         print(header)
-        print("  " + "-" * 63)
-        for r in all_results:
-            scores = r["scores"]
-            print(f"  {r['mode'].upper():<15} "
-                  f"{scores.get('task_easy', 0):.2f}     "
-                  f"{scores.get('task_medium', 0):.2f}     "
-                  f"{scores.get('task_hard', 0):.2f}     "
-                  f"{r['average']:.2f}     "
-                  f"{r['avg_precision']:.0%}      "
-                  f"{r['elapsed']:.1f}s")
+        print("  " + "-" * 66)
+        for result in results:
+            scores = result["scores"]
+            print(
+                f"  {result['mode'].upper():<12} "
+                f"{scores['task_easy']:.2f}     {scores['task_medium']:.2f}     "
+                f"{scores['task_hard']:.2f}     {result['average']:.2f}     "
+                f"{result['avg_precision']:.0%}      {result['elapsed']:.1f}s"
+            )
     else:
-        r = all_results[0]
-        for tid, tname in TASK_LIST.items():
-            score = r["scores"].get(tid, 0)
-            print(f"    {tname:35s}: {score:.2f}")
-        print(f"\n    Average score:     {r['average']:.2f}")
-        print(f"    Total time:        {r['elapsed']:.1f}s")
-        print(f"    LLM calls:         {r['total_llm']}")
-        print(f"    Total steps:       {r['total_steps']}")
-        print(f"    Average precision: {r['avg_precision']:.0%}")
-
-    print("=" * 65)
+        result = results[0]
+        for task_id, task_name in TASK_LIST.items():
+            print(f"    {task_name:38s}: {result['scores'][task_id]:.2f}")
+        print(f"\n    Average score:     {result['average']:.2f}")
+        print(f"    Total time:        {result['elapsed']:.1f}s")
+        print(f"    LLM calls:         {result['total_llm']}")
+        print(f"    Total steps:       {result['total_steps']}")
+        print(f"    Average precision: {result['avg_precision']:.0%}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

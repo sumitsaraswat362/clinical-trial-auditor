@@ -1,33 +1,23 @@
 """
 Procedural Adversarial Clinical Trial Data Engine
-==================================================
-Generates statistically rigorous, adversarial patient datasets for each episode.
+=================================================
+Generates seeded, protocol-driven clinical trial datasets for OpenEnv episodes.
 
-Design philosophy:
-  - Every reset() → unique dataset → no memorization possible
-  - Controlled error injection with known ground truth
-  - Adversarial traps that punish shallow reasoning
-  - Seed-based reproducibility for deterministic judging
-  - Pure stdlib (no numpy) → minimal Docker image
-
-Architecture layers:
-  1. Base Patient Generator — realistic demographics via statistical distributions
-  2. Error Injector — controlled % of age/temporal/missing violations
-  3. Bias Injector — demographic skew + outcome disparity in control group
-  4. Trap Injector — boundary-valid, near-temporal, fake-pattern distractors
-  5. Ground Truth Tracker — records every injected error for deterministic grading
+This generator is intentionally benchmark-oriented:
+  - each episode samples a different protocol excerpt and hidden rule set
+  - age eligibility is protocol-specific, not a fixed 18-120 shortcut
+  - treatment scheduling uses stage-aware exceptions to create valid edge cases
+  - hard episodes alternate between true bias and confounded "looks bad" cohorts
+  - all labels remain deterministic and reproducible from the seed
 """
 
-import random
-import math
+from __future__ import annotations
+
 import hashlib
+import random
 from datetime import datetime, timedelta
 from typing import Optional
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# REFERENCE DATA — Realistic clinical trial metadata pools
-# ═══════════════════════════════════════════════════════════════════════════
 
 HOSPITAL_SITES = [
     ("Metro General Hospital", "US"),
@@ -37,8 +27,8 @@ HOSPITAL_SITES = [
     ("MD Anderson Cancer Center", "US"),
     ("AIIMS Delhi", "India"),
     ("Tata Memorial Hospital", "India"),
-    ("Charité Berlin", "Germany"),
-    ("Hospital Clínic Barcelona", "Spain"),
+    ("Charite Berlin", "Germany"),
+    ("Hospital Clinic Barcelona", "Spain"),
     ("Tokyo Medical University", "Japan"),
     ("Seoul National University Hospital", "South Korea"),
     ("Royal Marsden Hospital", "UK"),
@@ -47,98 +37,97 @@ HOSPITAL_SITES = [
     ("Peter MacCallum Cancer Centre", "Australia"),
 ]
 
-# Sites considered "rural" or underrepresented for bias analysis
 RURAL_SITES = {
-    "AIIMS Delhi", "Tata Memorial Hospital",
+    "AIIMS Delhi",
     "Howard University Hospital",
+    "Tata Memorial Hospital",
 }
 
-ETHNICITIES = ["White", "Black", "Hispanic", "Asian", "Native American", "Pacific Islander"]
+ETHNICITIES = [
+    "White",
+    "Black",
+    "Hispanic",
+    "Asian",
+    "Native American",
+    "Pacific Islander",
+]
 GENDERS = ["M", "F"]
 STAGES = ["I", "II", "III", "IV"]
 DRUGS_TREATMENT = ["ImmunoVax-7", "OncoShield-X", "TargetCure-3"]
-DRUGS_CONTROL = ["Placebo"]
 
-# Date range for the trial
 TRIAL_START = datetime(2022, 6, 1)
 TRIAL_END = datetime(2025, 3, 1)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# DIFFICULTY CONFIGURATIONS
-# ═══════════════════════════════════════════════════════════════════════════
+BASE_STAGE_MORTALITY = {
+    "I": 0.04,
+    "II": 0.08,
+    "III": 0.16,
+    "IV": 0.32,
+}
+
+AGE_RULESETS = {
+    "easy": [(35, 75), (40, 80), (45, 85)],
+    "medium": [(18, 75), (21, 80), (30, 85), (40, 90)],
+    "hard": [(18, 75), (21, 80), (30, 85), (35, 85), (40, 90)],
+}
+
+WINDOW_RULESETS = {
+    "easy": [21, 24, 28],
+    "medium": [18, 21, 24, 28],
+    "hard": [14, 18, 21, 24],
+}
 
 DIFFICULTY_CONFIGS = {
     "easy": {
         "dataset_size": 300,
-        "age_error_rate": 0.03,          # 3% of patients have invalid ages
-        "temporal_error_rate": 0.0,       # No temporal errors in easy
-        "missing_data_rate": 0.01,        # 1% missing age
-        "bias_intensity": 0.0,            # No bias in easy
-        "num_boundary_traps": 5,          # Valid edge-case ages
+        "age_error_rate": 0.020,
+        "missing_age_rate": 0.007,
+        "temporal_error_rate": 0.0,
+        "protocol_window_error_rate": 0.0,
+        "num_boundary_traps": 8,
         "num_temporal_traps": 0,
-        "num_distractor_deceased": 4,     # Valid deceased patients
-        "num_fake_bias_distractors": 0,
-        "mortality_rate": 0.12,           # 12% overall mortality
-        "control_ratio": 0.50,            # 50/50 control/treatment
-        "task_type": "syntactic_cleaning",
-        "allow_bias": False,
-    },
-    "medium": {
-        "dataset_size": 500,
-        "age_error_rate": 0.03,
-        "temporal_error_rate": 0.03,      # 3% temporal violations
-        "missing_data_rate": 0.015,
-        "bias_intensity": 0.0,
-        "num_boundary_traps": 6,
-        "num_temporal_traps": 3,          # Near-temporal valid cases
+        "num_window_traps": 0,
         "num_distractor_deceased": 5,
         "num_fake_bias_distractors": 0,
-        "mortality_rate": 0.15,
+        "bias_probability": 0.0,
         "control_ratio": 0.50,
-        "task_type": "temporal_consistency",
-        "allow_bias": False,
+        "task_type": "eligibility_screening",
+    },
+    "medium": {
+        "dataset_size": 480,
+        "age_error_rate": 0.018,
+        "missing_age_rate": 0.007,
+        "temporal_error_rate": 0.012,
+        "protocol_window_error_rate": 0.015,
+        "num_boundary_traps": 10,
+        "num_temporal_traps": 4,
+        "num_window_traps": 5,
+        "num_distractor_deceased": 6,
+        "num_fake_bias_distractors": 0,
+        "bias_probability": 0.0,
+        "control_ratio": 0.50,
+        "task_type": "protocol_timeline_audit",
     },
     "hard": {
-        "dataset_size": 800,
-        "age_error_rate": 0.025,
-        "temporal_error_rate": 0.025,
-        "missing_data_rate": 0.01,
-        "bias_intensity": 0.80,           # Strong bias
-        "num_boundary_traps": 8,
-        "num_temporal_traps": 4,
+        "dataset_size": 720,
+        "age_error_rate": 0.017,
+        "missing_age_rate": 0.006,
+        "temporal_error_rate": 0.010,
+        "protocol_window_error_rate": 0.014,
+        "num_boundary_traps": 12,
+        "num_temporal_traps": 5,
+        "num_window_traps": 7,
         "num_distractor_deceased": 8,
-        "num_fake_bias_distractors": 5,   # Fake patterns that look biased but aren't
-        "mortality_rate": 0.18,
+        "num_fake_bias_distractors": 8,
+        "bias_probability": 0.58,
         "control_ratio": 0.50,
-        "task_type": "comprehensive_audit",
-        "allow_bias": True,
+        "task_type": "equity_and_protocol_audit",
     },
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# DATASET GENERATOR
-# ═══════════════════════════════════════════════════════════════════════════
-
 class DatasetGenerator:
-    """
-    Procedural adversarial clinical trial data engine.
-
-    Generates statistically rigorous patient datasets with:
-    - Configurable size (300-1000+ patients)
-    - Controlled error injection (age, temporal, missing data)
-    - Controllable bias intensity (representation + outcome disparity)
-    - Adversarial traps (boundary-valid, near-temporal, fake patterns)
-    - Seed-based reproducibility (same seed → identical dataset)
-
-    Usage:
-        gen = DatasetGenerator(seed=42)
-        result = gen.generate(difficulty="hard")
-        dataset = result["dataset"]          # List[dict] — patient records
-        ground_truth = result["ground_truth"] # Dict[str, List[str]] — {pid: [error_types]}
-        traps = result["traps"]              # Set[str] — valid-but-suspicious pids
-        bias_present = result["bias_present"] # bool
-    """
+    """Seeded benchmark dataset generator."""
 
     def __init__(self, seed: Optional[int] = None):
         self.seed = seed
@@ -151,58 +140,122 @@ class DatasetGenerator:
         self._patient_counter += 1
         return f"P{self._patient_counter:04d}"
 
+    def _mark_error(self, patient_id: str, error_type: str) -> None:
+        self._ground_truth.setdefault(patient_id, []).append(error_type)
+
     def _random_date(self, start: datetime, end: datetime) -> datetime:
-        """Generate a random date between start and end."""
         delta = (end - start).days
         if delta <= 0:
             return start
         return start + timedelta(days=self.rng.randint(0, delta))
 
-    def _generate_age(self) -> int:
-        """Generate a realistic age using truncated normal distribution."""
-        # Clinical trial typical age: mean=58, std=12
+    def _build_protocol(self, difficulty: str, config: dict) -> dict:
+        age_min, age_max = self.rng.choice(AGE_RULESETS[difficulty])
+        treatment_window = self.rng.choice(WINDOW_RULESETS[difficulty])
+        stage_iv_window = treatment_window + self.rng.choice([7, 10, 14])
+        high_risk_sites = self.rng.sample(sorted(RURAL_SITES), k=2 if difficulty == "hard" else 1)
+        dominant_threshold = self.rng.choice([0.68, 0.70, 0.72]) if difficulty == "hard" else 0.0
+        male_threshold = self.rng.choice([0.56, 0.60, 0.63]) if difficulty == "hard" else 0.0
+        adjusted_gap = self.rng.choice([0.12, 0.15, 0.18]) if difficulty == "hard" else 0.0
+        bias_present = difficulty == "hard" and self.rng.random() < config["bias_probability"]
+        protocol_key = (
+            f"{difficulty}|{age_min}|{age_max}|{treatment_window}|"
+            f"{stage_iv_window}|{'/'.join(high_risk_sites)}|{bias_present}"
+        )
+        protocol_id = hashlib.sha1(protocol_key.encode("utf-8")).hexdigest()[:8].upper()
+        protocol_title = f"ONCO-AX-{difficulty[:1].upper()}{protocol_id}"
+
+        lines = [
+            f"TRIAL PROTOCOL EXCERPT — {protocol_title}",
+            "",
+            "Eligibility",
+            f"- Participants must be age {age_min}-{age_max} inclusive on enrollment.",
+            "- Missing age is a protocol violation.",
+            "",
+            "Treatment Scheduling",
+            f"- Treatment must begin within {treatment_window} days of enrollment.",
+            (
+                f"- Stage IV exception: treatment may begin within "
+                f"{stage_iv_window} days of enrollment."
+            ),
+            "- death_date must never precede treatment_start.",
+            "- Do not assume a generic 18-120 range; this excerpt overrides defaults.",
+        ]
+
+        if difficulty == "hard":
+            lines.extend(
+                [
+                    "",
+                    "Equity Review",
+                    "- Selection bias concerns control-arm composition, not treatment-arm skew.",
+                    "- Compare mortality within stage strata before escalating a bias concern.",
+                    (
+                        f"- Stage IV patients at {', '.join(high_risk_sites)} are a known "
+                        "high-risk outreach cohort; elevated mortality there is not standalone "
+                        "evidence of unfair sampling."
+                    ),
+                    (
+                        f"- Escalate bias only when control-arm dominance exceeds "
+                        f"{int(dominant_threshold * 100)}%, male share exceeds "
+                        f"{int(male_threshold * 100)}%, and stage-adjusted mortality gap "
+                        f"exceeds {int(adjusted_gap * 100)} percentage points."
+                    ),
+                ]
+            )
+
+        return {
+            "protocol_id": protocol_id,
+            "protocol_title": protocol_title,
+            "excerpt": "\n".join(lines),
+            "age_min": age_min,
+            "age_max": age_max,
+            "treatment_window_days": treatment_window,
+            "stage_iv_treatment_window_days": stage_iv_window,
+            "high_risk_sites": high_risk_sites,
+            "bias_control_dominance_threshold": dominant_threshold,
+            "bias_male_threshold": male_threshold,
+            "bias_stage_adjusted_gap": adjusted_gap,
+            "bias_present": bias_present,
+        }
+
+    def _generate_age(self, protocol: dict) -> int:
         while True:
-            age = int(self.rng.gauss(58, 12))
-            if 18 <= age <= 100:
+            age = int(self.rng.gauss(58, 11))
+            if protocol["age_min"] <= age <= protocol["age_max"]:
                 return age
 
     def _select_ethnicity(self, bias_mode: str = "neutral") -> str:
-        """
-        Select ethnicity with configurable distribution.
-        bias_mode: "neutral" | "white_dominant" | "diverse"
-        """
-        if bias_mode == "white_dominant":
-            weights = [0.78, 0.06, 0.06, 0.05, 0.03, 0.02]
-        elif bias_mode == "diverse":
-            weights = [0.30, 0.20, 0.20, 0.15, 0.10, 0.05]
-        else:  # neutral — matches US clinical trial demographics
-            weights = [0.55, 0.15, 0.15, 0.10, 0.03, 0.02]
-
+        if bias_mode == "diverse":
+            weights = [0.28, 0.19, 0.20, 0.18, 0.10, 0.05]
+        elif bias_mode == "white_dominant":
+            weights = [0.68, 0.08, 0.08, 0.08, 0.05, 0.03]
+        else:
+            weights = [0.50, 0.16, 0.15, 0.12, 0.04, 0.03]
         return self.rng.choices(ETHNICITIES, weights=weights, k=1)[0]
 
-    def _generate_base_patient(self, group: str, ethnicity: str = None,
-                                bias_mode: str = "neutral") -> dict:
-        """Generate a single valid patient record."""
+    def _base_delay(self, stage: str, protocol: dict) -> int:
+        max_window = (
+            protocol["stage_iv_treatment_window_days"]
+            if stage == "IV"
+            else protocol["treatment_window_days"]
+        )
+        lower = 5 if max_window >= 10 else 1
+        upper = max(lower, max_window - 2)
+        return self.rng.randint(lower, upper)
+
+    def _generate_base_patient(self, group: str, protocol: dict, bias_mode: str = "neutral") -> dict:
         pid = self._next_pid()
         site, country = self.rng.choice(HOSPITAL_SITES)
-        gender = self.rng.choice(GENDERS)
-        eth = ethnicity or self._select_ethnicity(bias_mode)
-        age = self._generate_age()
-        stage = self.rng.choices(STAGES, weights=[0.25, 0.30, 0.25, 0.20], k=1)[0]
-
-        enrollment_date = self._random_date(TRIAL_START, TRIAL_END - timedelta(days=180))
-        treatment_start = enrollment_date + timedelta(days=self.rng.randint(7, 30))
-
-        if group == "treatment":
-            drug = self.rng.choice(DRUGS_TREATMENT)
-        else:
-            drug = "Placebo"
-
-        patient = {
+        stage = self.rng.choices(STAGES, weights=[0.24, 0.28, 0.28, 0.20], k=1)[0]
+        age = self._generate_age(protocol)
+        enrollment_end = TRIAL_END - timedelta(days=150)
+        enrollment_date = self._random_date(TRIAL_START, enrollment_end)
+        treatment_start = enrollment_date + timedelta(days=self._base_delay(stage, protocol))
+        return {
             "patient_id": pid,
             "age": age,
-            "gender": gender,
-            "ethnicity": eth,
+            "gender": self.rng.choice(GENDERS),
+            "ethnicity": self._select_ethnicity(bias_mode),
             "group": group,
             "treatment_start": treatment_start.strftime("%Y-%m-%d"),
             "death_date": None,
@@ -210,459 +263,422 @@ class DatasetGenerator:
             "treatment_site": site,
             "stage": stage,
             "trial_phase": "Phase III",
-            "drug": drug,
+            "drug": self.rng.choice(DRUGS_TREATMENT) if group == "treatment" else "Placebo",
             "enrollment_date": enrollment_date.strftime("%Y-%m-%d"),
             "country": country,
         }
 
+    def _mortality_rate(self, patient: dict, protocol: dict) -> float:
+        rate = BASE_STAGE_MORTALITY.get(patient["stage"], 0.10)
+        if patient["treatment_site"] in protocol["high_risk_sites"] and patient["stage"] == "IV":
+            rate += 0.16
+        if patient["group"] == "treatment":
+            rate *= 0.92
+        return max(0.02, min(0.82, rate))
+
+    def _set_deceased(self, patient: dict, min_days: int, max_days: int) -> None:
+        treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
+        days_to_death = self.rng.randint(min_days, max_days)
+        death_date = treatment_start + timedelta(days=days_to_death)
+        patient["death_date"] = death_date.strftime("%Y-%m-%d")
+        patient["outcome"] = "deceased"
+
+    def _apply_mortality(self, patient: dict, protocol: dict) -> dict:
+        if self.rng.random() < self._mortality_rate(patient, protocol):
+            self._set_deceased(patient, min_days=3, max_days=540)
         return patient
 
-    def _apply_mortality(self, patient: dict, mortality_rate: float) -> dict:
-        """Randomly apply mortality with valid timeline."""
-        if self.rng.random() < mortality_rate:
-            treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
-            # Death occurs 1-720 days after treatment start
-            days_to_death = self.rng.randint(1, 720)
-            death_date = treatment_start + timedelta(days=days_to_death)
-            # Cap at trial end
-            if death_date > TRIAL_END + timedelta(days=365):
-                death_date = TRIAL_END + timedelta(days=self.rng.randint(1, 180))
+    def _apply_target_mortality(self, cohort: list[dict], target_rate: float) -> None:
+        if not cohort:
+            return
+        self.rng.shuffle(cohort)
+        target_count = int(round(len(cohort) * max(0.0, min(1.0, target_rate))))
+        for index, patient in enumerate(cohort):
+            if index < target_count:
+                self._set_deceased(patient, min_days=10, max_days=420)
+            else:
+                patient["death_date"] = None
+                patient["outcome"] = "survived"
 
-            patient["death_date"] = death_date.strftime("%Y-%m-%d")
-            patient["outcome"] = "deceased"
-        return patient
+    def _allowed_treatment_window(self, patient: dict, protocol: dict) -> int:
+        return (
+            protocol["stage_iv_treatment_window_days"]
+            if patient.get("stage") == "IV"
+            else protocol["treatment_window_days"]
+        )
 
-    # ── Error Injectors ───────────────────────────────────────────────
+    def _enrollment_date(self, patient: dict) -> datetime:
+        return datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
 
-    def _inject_age_errors(self, patients: list[dict], error_rate: float,
-                            missing_rate: float) -> list[dict]:
-        """Inject invalid age values into random patients."""
-        n_age_errors = max(3, int(len(patients) * error_rate))
-        n_missing = max(1, int(len(patients) * missing_rate))
+    def _treatment_date(self, patient: dict) -> datetime:
+        return datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
 
-        # Select random indices for age errors (avoid overlap)
+    def _inject_age_errors(self, patients: list[dict], protocol: dict, config: dict) -> list[dict]:
+        n_invalid = max(3, int(len(patients) * config["age_error_rate"]))
+        n_missing = max(1, int(len(patients) * config["missing_age_rate"]))
         available = list(range(len(patients)))
         self.rng.shuffle(available)
 
-        # Invalid age errors
-        invalid_ages = []
-        for _ in range(n_age_errors):
-            error_kind = self.rng.choice([
-                "negative", "extreme_high", "sentinel", "just_over"
-            ])
-            if error_kind == "negative":
-                invalid_ages.append(self.rng.choice([-1, -5, -10, -3, -15]))
-            elif error_kind == "extreme_high":
-                invalid_ages.append(self.rng.choice([150, 200, 250, 300, 500]))
-            elif error_kind == "sentinel":
-                invalid_ages.append(self.rng.choice([999, 9999, 0, -999]))
-            elif error_kind == "just_over":
-                invalid_ages.append(self.rng.choice([121, 122, 125, 130, 17, 16, 15]))
+        low_values = [protocol["age_min"] - 1, protocol["age_min"] - 2, max(0, protocol["age_min"] - 5), -1]
+        high_values = [protocol["age_max"] + 1, protocol["age_max"] + 2, protocol["age_max"] + 5, 999]
 
-        for i, invalid_age in enumerate(invalid_ages):
-            if i >= len(available):
-                break
-            idx = available[i]
-            patients[idx]["age"] = invalid_age
-            pid = patients[idx]["patient_id"]
-            self._ground_truth.setdefault(pid, []).append("invalid_age")
+        for offset in range(min(n_invalid, len(available))):
+            patient = patients[available[offset]]
+            patient["age"] = self.rng.choice(low_values + high_values)
+            self._mark_error(patient["patient_id"], "invalid_age")
 
-        # Missing age (None)
-        offset = len(invalid_ages)
-        for j in range(n_missing):
-            if offset + j >= len(available):
-                break
-            idx = available[offset + j]
-            patients[idx]["age"] = None
-            pid = patients[idx]["patient_id"]
-            self._ground_truth.setdefault(pid, []).append("invalid_age")
+        start = min(n_invalid, len(available))
+        for offset in range(start, min(start + n_missing, len(available))):
+            patient = patients[available[offset]]
+            patient["age"] = None
+            self._mark_error(patient["patient_id"], "invalid_age")
 
         return patients
 
-    def _inject_temporal_errors(self, patients: list[dict],
-                                 error_rate: float) -> list[dict]:
-        """Inject temporal violations: death_date before treatment_start."""
-        n_errors = max(3, int(len(patients) * error_rate))
-
-        # Only inject into patients who have death dates or can have one added
-        candidates = []
-        for i, p in enumerate(patients):
-            pid = p["patient_id"]
-            # Don't stack errors on patients already with age errors
-            if pid not in self._ground_truth:
-                candidates.append(i)
-
+    def _inject_temporal_errors(self, patients: list[dict], config: dict) -> list[dict]:
+        n_errors = max(3, int(len(patients) * config["temporal_error_rate"]))
+        candidates = [p for p in patients if p["patient_id"] not in self._ground_truth]
         self.rng.shuffle(candidates)
 
-        for k in range(min(n_errors, len(candidates))):
-            idx = candidates[k]
-            p = patients[idx]
-            treatment_start = datetime.strptime(p["treatment_start"], "%Y-%m-%d")
-
-            # Death date 15-365 days BEFORE treatment start (clear violation)
-            gap_days = self.rng.randint(15, 365)
-            death_date = treatment_start - timedelta(days=gap_days)
-
-            p["death_date"] = death_date.strftime("%Y-%m-%d")
-            p["outcome"] = "deceased"
-
-            pid = p["patient_id"]
-            self._ground_truth.setdefault(pid, []).append("temporal_inconsistency")
+        for patient in candidates[:n_errors]:
+            treatment_start = self._treatment_date(patient)
+            death_date = treatment_start - timedelta(days=self.rng.randint(10, 240))
+            patient["death_date"] = death_date.strftime("%Y-%m-%d")
+            patient["outcome"] = "deceased"
+            self._mark_error(patient["patient_id"], "temporal_inconsistency")
 
         return patients
 
-    def _inject_bias(self, patients: list[dict], intensity: float) -> list[dict]:
-        """
-        Inject multi-dimensional selection bias into the control group.
+    def _inject_protocol_window_errors(
+        self,
+        patients: list[dict],
+        protocol: dict,
+        config: dict,
+    ) -> list[dict]:
+        n_errors = max(3, int(len(patients) * config["protocol_window_error_rate"]))
+        candidates = [p for p in patients if p["patient_id"] not in self._ground_truth]
+        self.rng.shuffle(candidates)
 
-        Bias structure (mirrors real SEER findings):
-        1. Representation: White patients dominate control group (>75%)
-        2. Outcome disparity: Minority control patients have higher mortality
-        3. Gender imbalance: Males overrepresented in control
-        4. Site bias: Minorities underrepresented at major sites
-        """
-        if intensity <= 0:
-            return patients
-
-        control_patients = [p for p in patients if p["group"] == "control"]
-        treatment_patients = [p for p in patients if p["group"] == "treatment"]
-
-        if not control_patients:
-            return patients
-
-        # ── Layer 1: Representation bias ──
-        # Force >75% of control to be White
-        target_white_ratio = 0.75 + (intensity * 0.10)  # 0.75-0.85
-        n_control = len(control_patients)
-        n_white_target = int(n_control * target_white_ratio)
-        n_white_current = sum(1 for p in control_patients if p["ethnicity"] == "White")
-
-        # Convert some non-White control patients to White
-        non_white_control = [p for p in control_patients if p["ethnicity"] != "White"]
-        to_convert = max(0, n_white_target - n_white_current)
-        self.rng.shuffle(non_white_control)
-        for i in range(min(to_convert, len(non_white_control))):
-            non_white_control[i]["ethnicity"] = "White"
-
-        # ── Layer 2: Gender imbalance in control ──
-        # Force >65% male in control
-        target_male_ratio = 0.65 + (intensity * 0.10)
-        n_male_target = int(n_control * target_male_ratio)
-        n_male_current = sum(1 for p in control_patients if p["gender"] == "M")
-        female_control = [p for p in control_patients if p["gender"] == "F"]
-        to_convert_gender = max(0, n_male_target - n_male_current)
-        self.rng.shuffle(female_control)
-        for i in range(min(to_convert_gender, len(female_control))):
-            female_control[i]["gender"] = "M"
-
-        # ── Layer 3: Outcome disparity ──
-        # Minority patients in control → higher mortality (>60%)
-        minority_control = [
-            p for p in control_patients
-            if p["ethnicity"] != "White" and p["patient_id"] not in self._ground_truth
-        ]
-        target_minority_mortality = 0.60 + (intensity * 0.15)
-        n_minority_dead = int(len(minority_control) * target_minority_mortality)
-
-        for i, p in enumerate(minority_control):
-            if i < n_minority_dead:
-                if p["outcome"] != "deceased":
-                    treatment_start = datetime.strptime(p["treatment_start"], "%Y-%m-%d")
-                    death_date = treatment_start + timedelta(
-                        days=self.rng.randint(30, 365)
-                    )
-                    p["death_date"] = death_date.strftime("%Y-%m-%d")
-                    p["outcome"] = "deceased"
-
-        # ── Layer 4: White control patients → low mortality ──
-        white_control = [
-            p for p in control_patients
-            if p["ethnicity"] == "White" and p["patient_id"] not in self._ground_truth
-        ]
-        # Keep White mortality low
-        target_white_survival = 0.85
-        n_white_alive = int(len(white_control) * target_white_survival)
-        for i, p in enumerate(white_control):
-            if i < n_white_alive:
-                p["death_date"] = None
-                p["outcome"] = "survived"
-
-        # ── Layer 5: Rural minority underrepresentation ──
-        for p in minority_control:
-            if p["treatment_site"] in RURAL_SITES:
-                # Move some to major sites (reducing rural minority visibility)
-                if self.rng.random() < intensity * 0.5:
-                    major_sites = [
-                        s for s in HOSPITAL_SITES
-                        if s[0] not in RURAL_SITES
-                    ]
-                    new_site = self.rng.choice(major_sites)
-                    p["treatment_site"] = new_site[0]
-                    p["country"] = new_site[1]
+        for patient in candidates[:n_errors]:
+            allowed_days = self._allowed_treatment_window(patient, protocol)
+            enrollment = self._enrollment_date(patient)
+            violation_days = allowed_days + self.rng.randint(2, 18)
+            patient["treatment_start"] = (enrollment + timedelta(days=violation_days)).strftime("%Y-%m-%d")
+            if patient["death_date"]:
+                death_date = datetime.strptime(patient["death_date"], "%Y-%m-%d")
+                treatment_start = self._treatment_date(patient)
+                if death_date <= treatment_start:
+                    self._set_deceased(patient, min_days=20, max_days=320)
+            self._mark_error(patient["patient_id"], "protocol_window_violation")
 
         return patients
 
-    # ── Trap Injectors ────────────────────────────────────────────────
-
-    def _inject_boundary_traps(self, patients: list[dict], n_traps: int) -> list[dict]:
-        """
-        Inject boundary-valid ages that trap naive agents.
-        Ages like 18, 19, 120 are VALID but suspicious.
-        """
-        boundary_ages = [18, 19, 20, 90, 92, 95, 96, 100, 105, 110, 115, 118, 119, 120, 120]
-        self.rng.shuffle(boundary_ages)  # Randomize which traps appear
+    def _inject_boundary_traps(self, patients: list[dict], protocol: dict, n_traps: int) -> list[dict]:
+        valid_ages = [
+            protocol["age_min"],
+            protocol["age_min"] + 1,
+            protocol["age_min"] + 2,
+            protocol["age_max"] - 2,
+            protocol["age_max"] - 1,
+            protocol["age_max"],
+        ]
         available = [
-            i for i, p in enumerate(patients)
-            if p["patient_id"] not in self._ground_truth
-            and p["age"] is not None and 25 <= p["age"] <= 85
+            p
+            for p in patients
+            if p["patient_id"] not in self._ground_truth and p["age"] is not None
         ]
         self.rng.shuffle(available)
-
-        for k in range(min(n_traps, len(available), len(boundary_ages))):
-            idx = available[k]
-            patients[idx]["age"] = boundary_ages[k]
-            self._traps.add(patients[idx]["patient_id"])
-
+        for patient, age in zip(available[:n_traps], valid_ages * max(1, n_traps)):
+            patient["age"] = age
+            self._traps.add(patient["patient_id"])
         return patients
 
     def _inject_temporal_traps(self, patients: list[dict], n_traps: int) -> list[dict]:
-        """
-        Inject near-temporal valid cases: death 1-3 days AFTER treatment start.
-        These are VALID but look like errors to careless agents.
-        """
         available = [
-            i for i, p in enumerate(patients)
+            p
+            for p in patients
             if p["patient_id"] not in self._ground_truth
-            and p["death_date"] is None
             and p["patient_id"] not in self._traps
+            and p["death_date"] is None
         ]
         self.rng.shuffle(available)
-
-        for k in range(min(n_traps, len(available))):
-            idx = available[k]
-            p = patients[idx]
-            treatment_start = datetime.strptime(p["treatment_start"], "%Y-%m-%d")
-            # Death 1-3 days AFTER treatment — valid but suspicious
-            gap = self.rng.randint(1, 3)
-            death_date = treatment_start + timedelta(days=gap)
-            p["death_date"] = death_date.strftime("%Y-%m-%d")
-            p["outcome"] = "deceased"
-            p["stage"] = "IV"  # Make it medically plausible (late-stage)
-            self._traps.add(p["patient_id"])
-
+        for patient in available[:n_traps]:
+            patient["stage"] = "IV"
+            self._set_deceased(patient, min_days=1, max_days=3)
+            self._traps.add(patient["patient_id"])
         return patients
 
-    def _inject_fake_bias_distractors(self, patients: list[dict],
-                                       n_distractors: int) -> list[dict]:
-        """
-        Inject patterns that LOOK like bias but aren't.
-        E.g., treatment group with demographic skew (doesn't matter for bias detection
-        since only control group bias is relevant).
-        """
-        treatment_patients = [
-            i for i, p in enumerate(patients)
+    def _inject_window_traps(self, patients: list[dict], protocol: dict, n_traps: int) -> list[dict]:
+        available = [
+            p
+            for p in patients
+            if p["patient_id"] not in self._ground_truth and p["patient_id"] not in self._traps
+        ]
+        self.rng.shuffle(available)
+        for patient in available[:n_traps]:
+            enrollment = self._enrollment_date(patient)
+            if self.rng.random() < 0.55:
+                patient["stage"] = "IV"
+            allowed_days = self._allowed_treatment_window(patient, protocol)
+            trap_delay = max(1, allowed_days - self.rng.choice([0, 1]))
+            patient["treatment_start"] = (enrollment + timedelta(days=trap_delay)).strftime("%Y-%m-%d")
+            if patient["death_date"]:
+                death_date = datetime.strptime(patient["death_date"], "%Y-%m-%d")
+                if death_date <= self._treatment_date(patient):
+                    self._set_deceased(patient, min_days=12, max_days=240)
+            self._traps.add(patient["patient_id"])
+        return patients
+
+    def _inject_distractor_deceased(self, patients: list[dict], n_distractors: int) -> list[dict]:
+        available = [
+            p
+            for p in patients
+            if p["patient_id"] not in self._ground_truth
+            and p["patient_id"] not in self._traps
+            and p["death_date"] is None
+        ]
+        self.rng.shuffle(available)
+        for patient in available[:n_distractors]:
+            self._set_deceased(patient, min_days=30, max_days=520)
+            self._traps.add(patient["patient_id"])
+        return patients
+
+    def _inject_fake_bias_distractors(self, patients: list[dict], n_distractors: int) -> list[dict]:
+        treatment_group = [
+            p
+            for p in patients
             if p["group"] == "treatment"
             and p["patient_id"] not in self._ground_truth
             and p["patient_id"] not in self._traps
         ]
-        self.rng.shuffle(treatment_patients)
-
-        for k in range(min(n_distractors, len(treatment_patients))):
-            idx = treatment_patients[k]
-            # Make treatment group look skewed (irrelevant for bias detection)
-            patients[idx]["ethnicity"] = "White"
-            patients[idx]["gender"] = "M"
-            self._traps.add(patients[idx]["patient_id"])
-
+        self.rng.shuffle(treatment_group)
+        for patient in treatment_group[:n_distractors]:
+            patient["ethnicity"] = "White"
+            patient["gender"] = "M"
+            if self.rng.random() < 0.5:
+                patient["stage"] = "IV"
+                self._set_deceased(patient, min_days=15, max_days=180)
+            self._traps.add(patient["patient_id"])
         return patients
 
-    def _inject_distractor_deceased(self, patients: list[dict],
-                                     n_distractors: int) -> list[dict]:
-        """
-        Add deceased patients with perfectly valid timelines.
-        These are NOT errors — tests if agent over-flags deceased patients.
-        """
-        available = [
-            i for i, p in enumerate(patients)
-            if p["patient_id"] not in self._ground_truth
-            and p["death_date"] is None
-            and p["patient_id"] not in self._traps
+    def _inject_selection_bias(self, patients: list[dict], protocol: dict) -> None:
+        control = [
+            p
+            for p in patients
+            if p["group"] == "control" and p["patient_id"] not in self._ground_truth
         ]
-        self.rng.shuffle(available)
+        if not control:
+            return
 
-        for k in range(min(n_distractors, len(available))):
-            idx = available[k]
-            p = patients[idx]
-            treatment_start = datetime.strptime(p["treatment_start"], "%Y-%m-%d")
-            # Death 30-540 days after treatment (clearly valid)
-            days = self.rng.randint(30, 540)
-            death_date = treatment_start + timedelta(days=days)
-            p["death_date"] = death_date.strftime("%Y-%m-%d")
-            p["outcome"] = "deceased"
-            self._traps.add(p["patient_id"])
+        target_dom_ratio = protocol["bias_control_dominance_threshold"] + self.rng.uniform(0.06, 0.12)
+        dominant_target = int(len(control) * min(0.86, target_dom_ratio))
+        white_control = [p for p in control if p["ethnicity"] == "White"]
+        non_white_control = [p for p in control if p["ethnicity"] != "White"]
+        needed = max(0, dominant_target - len(white_control))
+        self.rng.shuffle(non_white_control)
+        for patient in non_white_control[:needed]:
+            patient["ethnicity"] = "White"
 
-        return patients
+        target_male_ratio = protocol["bias_male_threshold"] + self.rng.uniform(0.05, 0.10)
+        male_target = int(len(control) * min(0.82, target_male_ratio))
+        male_control = [p for p in control if p["gender"] == "M"]
+        female_control = [p for p in control if p["gender"] == "F"]
+        needed_male = max(0, male_target - len(male_control))
+        self.rng.shuffle(female_control)
+        for patient in female_control[:needed_male]:
+            patient["gender"] = "M"
 
-    # ── Main Generator ────────────────────────────────────────────────
+        dominant = [p for p in control if p["ethnicity"] == "White"]
+        minority = [p for p in control if p["ethnicity"] != "White"]
+        for stage in STAGES:
+            stage_majority = [p for p in dominant if p["stage"] == stage]
+            stage_minority = [p for p in minority if p["stage"] == stage]
+            if not stage_majority or not stage_minority:
+                continue
+            base = BASE_STAGE_MORTALITY[stage]
+            self._apply_target_mortality(stage_majority, max(0.02, base - 0.03))
+            self._apply_target_mortality(stage_minority, min(0.82, base + 0.18))
+
+    def _inject_confounder_cohort(self, patients: list[dict], protocol: dict) -> None:
+        control = [
+            p
+            for p in patients
+            if p["group"] == "control" and p["patient_id"] not in self._ground_truth
+        ]
+        if not control:
+            return
+
+        minority = [p for p in control if p["ethnicity"] != "White"]
+        white = [p for p in control if p["ethnicity"] == "White"]
+        self.rng.shuffle(minority)
+        self.rng.shuffle(white)
+
+        minority_shift = max(8, len(control) // 18)
+        white_shift = max(4, len(control) // 30)
+
+        for patient in minority[:minority_shift]:
+            patient["stage"] = "IV"
+            patient["treatment_site"] = self.rng.choice(protocol["high_risk_sites"])
+            patient["country"] = next(
+                country for site, country in HOSPITAL_SITES if site == patient["treatment_site"]
+            )
+
+        for patient in white[:white_shift]:
+            patient["stage"] = "IV"
+            patient["treatment_site"] = self.rng.choice(protocol["high_risk_sites"])
+            patient["country"] = next(
+                country for site, country in HOSPITAL_SITES if site == patient["treatment_site"]
+            )
+
+        stage_iv_control = [p for p in control if p["stage"] == "IV"]
+        stage_iv_minority = [p for p in stage_iv_control if p["ethnicity"] != "White"]
+        stage_iv_white = [p for p in stage_iv_control if p["ethnicity"] == "White"]
+        self._apply_target_mortality(stage_iv_minority, 0.66)
+        self._apply_target_mortality(stage_iv_white, 0.63)
 
     def generate(self, difficulty: str = "easy") -> dict:
-        """
-        Generate a complete adversarial dataset for the given difficulty.
-
-        Returns:
-            {
-                "dataset": List[dict],          # Patient records
-                "ground_truth": Dict[str, List[str]],  # {pid: [error_types]}
-                "traps": Set[str],              # Valid-but-suspicious pids
-                "bias_present": bool,           # Whether bias was injected
-                "config": dict,                 # Generation parameters
-                "stats": dict,                  # Summary statistics
-            }
-        """
         config = DIFFICULTY_CONFIGS.get(difficulty, DIFFICULTY_CONFIGS["easy"])
         self._ground_truth = {}
         self._traps = set()
         self._patient_counter = 0
 
-        n = config["dataset_size"]
-        n_control = int(n * config["control_ratio"])
-        n_treatment = n - n_control
+        protocol = self._build_protocol(difficulty, config)
+        n_patients = config["dataset_size"]
+        n_control = int(n_patients * config["control_ratio"])
+        n_treatment = n_patients - n_control
 
-        # ── Step 1: Generate base patients ──
         patients = []
-
-        # Determine bias mode for control group
-        control_bias_mode = "white_dominant" if config["bias_intensity"] > 0 else "neutral"
-
         for _ in range(n_control):
-            p = self._generate_base_patient("control", bias_mode=control_bias_mode)
-            p = self._apply_mortality(p, config["mortality_rate"])
-            patients.append(p)
+            patient = self._generate_base_patient("control", protocol, bias_mode="neutral")
+            patients.append(self._apply_mortality(patient, protocol))
 
         for _ in range(n_treatment):
-            p = self._generate_base_patient("treatment", bias_mode="diverse")
-            p = self._apply_mortality(p, config["mortality_rate"])
-            patients.append(p)
+            patient = self._generate_base_patient("treatment", protocol, bias_mode="diverse")
+            patients.append(self._apply_mortality(patient, protocol))
 
-        # ── Step 2: Inject errors ──
-        patients = self._inject_age_errors(
-            patients, config["age_error_rate"], config["missing_data_rate"]
-        )
-
+        patients = self._inject_age_errors(patients, protocol, config)
         if config["temporal_error_rate"] > 0:
-            patients = self._inject_temporal_errors(
-                patients, config["temporal_error_rate"]
-            )
+            patients = self._inject_temporal_errors(patients, config)
+        if config["protocol_window_error_rate"] > 0:
+            patients = self._inject_protocol_window_errors(patients, protocol, config)
 
-        # ── Step 3: Inject bias (hard only) ──
-        if config["bias_intensity"] > 0:
-            patients = self._inject_bias(patients, config["bias_intensity"])
+        if difficulty == "hard":
+            if protocol["bias_present"]:
+                self._inject_selection_bias(patients, protocol)
+            else:
+                self._inject_confounder_cohort(patients, protocol)
 
-        # ── Step 4: Inject adversarial traps ──
-        patients = self._inject_boundary_traps(patients, config["num_boundary_traps"])
-
+        patients = self._inject_boundary_traps(patients, protocol, config["num_boundary_traps"])
         if config["num_temporal_traps"] > 0:
-            patients = self._inject_temporal_traps(
-                patients, config["num_temporal_traps"]
-            )
-
+            patients = self._inject_temporal_traps(patients, config["num_temporal_traps"])
+        if config["num_window_traps"] > 0:
+            patients = self._inject_window_traps(patients, protocol, config["num_window_traps"])
+        patients = self._inject_distractor_deceased(patients, config["num_distractor_deceased"])
         if config["num_fake_bias_distractors"] > 0:
-            patients = self._inject_fake_bias_distractors(
-                patients, config["num_fake_bias_distractors"]
-            )
+            patients = self._inject_fake_bias_distractors(patients, config["num_fake_bias_distractors"])
 
-        patients = self._inject_distractor_deceased(
-            patients, config["num_distractor_deceased"]
-        )
-
-        # ── Step 5: Shuffle dataset ──
         self.rng.shuffle(patients)
-
-        # ── Step 6: Compute summary stats ──
-        n_age_errors = sum(
-            1 for errs in self._ground_truth.values()
-            if "invalid_age" in errs
-        )
-        n_temporal_errors = sum(
-            1 for errs in self._ground_truth.values()
-            if "temporal_inconsistency" in errs
-        )
-        total_errors = n_age_errors + n_temporal_errors
-        if config["bias_intensity"] > 0:
-            total_errors += 1  # bias counts as 1 error
 
         stats = {
             "total_patients": len(patients),
-            "total_errors": total_errors,
-            "age_errors": n_age_errors,
-            "temporal_errors": n_temporal_errors,
-            "bias_present": config["bias_intensity"] > 0,
+            "age_errors": sum("invalid_age" in errs for errs in self._ground_truth.values()),
+            "temporal_errors": sum("temporal_inconsistency" in errs for errs in self._ground_truth.values()),
+            "protocol_window_errors": sum("protocol_window_violation" in errs for errs in self._ground_truth.values()),
+            "bias_present": protocol["bias_present"],
+            "bias_mode": "true_bias" if protocol["bias_present"] else ("confounded_no_bias" if difficulty == "hard" else "none"),
             "num_traps": len(self._traps),
             "control_count": sum(1 for p in patients if p["group"] == "control"),
             "treatment_count": sum(1 for p in patients if p["group"] == "treatment"),
+            "protocol_title": protocol["protocol_title"],
         }
+        stats["total_errors"] = (
+            stats["age_errors"]
+            + stats["temporal_errors"]
+            + stats["protocol_window_errors"]
+            + (1 if protocol["bias_present"] else 0)
+        )
 
         return {
             "dataset": patients,
             "ground_truth": dict(self._ground_truth),
             "traps": set(self._traps),
-            "bias_present": config["bias_intensity"] > 0,
+            "bias_present": protocol["bias_present"],
+            "protocol": protocol,
+            "protocol_excerpt": protocol["excerpt"],
+            "protocol_title": protocol["protocol_title"],
             "config": config,
             "stats": stats,
         }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# STANDALONE TEST
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     print("=" * 60)
     print("  Dataset Generator — Validation Test")
     print("=" * 60)
 
-    for diff in ["easy", "medium", "hard"]:
-        gen = DatasetGenerator(seed=42)
-        result = gen.generate(difficulty=diff)
+    for difficulty in ["easy", "medium", "hard"]:
+        generator = DatasetGenerator(seed=42)
+        result = generator.generate(difficulty=difficulty)
         stats = result["stats"]
-        print(f"\n  {diff.upper()}:")
+        protocol = result["protocol"]
+        print(f"\n  {difficulty.upper()}:")
+        print(f"    Protocol:    {stats['protocol_title']}")
         print(f"    Patients:    {stats['total_patients']}")
-        print(f"    Errors:      {stats['total_errors']} "
-              f"(age={stats['age_errors']}, temporal={stats['temporal_errors']}, "
-              f"bias={'yes' if stats['bias_present'] else 'no'})")
+        print(
+            f"    Errors:      {stats['total_errors']} "
+            f"(age={stats['age_errors']}, temporal={stats['temporal_errors']}, "
+            f"window={stats['protocol_window_errors']}, bias={stats['bias_mode']})"
+        )
         print(f"    Traps:       {stats['num_traps']}")
         print(f"    Control:     {stats['control_count']}")
         print(f"    Treatment:   {stats['treatment_count']}")
+        print(
+            f"    Rules:       age={protocol['age_min']}-{protocol['age_max']} | "
+            f"start<={protocol['treatment_window_days']}d | "
+            f"stage IV<={protocol['stage_iv_treatment_window_days']}d"
+        )
 
-        # Verify reproducibility
-        gen2 = DatasetGenerator(seed=42)
-        result2 = gen2.generate(difficulty=diff)
-        assert result["dataset"] == result2["dataset"], "REPRODUCIBILITY FAILED!"
-        assert result["ground_truth"] == result2["ground_truth"], "GROUND TRUTH MISMATCH!"
-        print(f"    ✓ Seed reproducibility verified")
+        generator_2 = DatasetGenerator(seed=42)
+        result_2 = generator_2.generate(difficulty=difficulty)
+        assert result["dataset"] == result_2["dataset"], "REPRODUCIBILITY FAILED!"
+        assert result["ground_truth"] == result_2["ground_truth"], "GROUND TRUTH MISMATCH!"
+        assert result["protocol_excerpt"] == result_2["protocol_excerpt"], "PROTOCOL MISMATCH!"
+        print("    ✓ Seed reproducibility verified")
 
-        # Verify ground truth
-        for pid, errors in result["ground_truth"].items():
-            patient = next(p for p in result["dataset"] if p["patient_id"] == pid)
-            for err in errors:
-                if err == "invalid_age":
+        for patient_id, errors in result["ground_truth"].items():
+            patient = next(p for p in result["dataset"] if p["patient_id"] == patient_id)
+            for error in errors:
+                if error == "invalid_age":
                     age = patient.get("age")
-                    assert age is None or age < 18 or age > 120, \
-                        f"Ground truth says {pid} invalid age but age={age}"
-                elif err == "temporal_inconsistency":
-                    ts = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
-                    dd = datetime.strptime(patient["death_date"], "%Y-%m-%d")
-                    assert dd < ts, \
-                        f"Ground truth says {pid} temporal error but dates are valid"
-        print(f"    ✓ Ground truth integrity verified")
+                    assert age is None or age < protocol["age_min"] or age > protocol["age_max"], (
+                        f"Ground truth says {patient_id} invalid age but age={age}"
+                    )
+                elif error == "temporal_inconsistency":
+                    treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
+                    death_date = datetime.strptime(patient["death_date"], "%Y-%m-%d")
+                    assert death_date < treatment_start, (
+                        f"Ground truth says {patient_id} temporal error but dates are valid"
+                    )
+                elif error == "protocol_window_violation":
+                    enrollment = datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
+                    treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
+                    allowed = (
+                        protocol["stage_iv_treatment_window_days"]
+                        if patient["stage"] == "IV"
+                        else protocol["treatment_window_days"]
+                    )
+                    assert (treatment_start - enrollment).days > allowed, (
+                        f"Ground truth says {patient_id} window error but delay is valid"
+                    )
+        print("    ✓ Ground truth integrity verified")
 
-    # Verify different seeds produce different datasets
-    gen_a = DatasetGenerator(seed=1)
-    gen_b = DatasetGenerator(seed=2)
-    result_a = gen_a.generate("easy")
-    result_b = gen_b.generate("easy")
-    assert result_a["dataset"] != result_b["dataset"], "Different seeds same data!"
-    print(f"\n    ✓ Different seeds produce different datasets")
+    generator_a = DatasetGenerator(seed=1)
+    generator_b = DatasetGenerator(seed=2)
+    result_a = generator_a.generate("easy")
+    result_b = generator_b.generate("easy")
+    assert result_a["dataset"] != result_b["dataset"], "Different seeds generated identical datasets!"
+    assert result_a["protocol_excerpt"] != result_b["protocol_excerpt"], "Different seeds generated identical protocols!"
+    print("\n    ✓ Different seeds produce different datasets")
     print(f"\n{'=' * 60}")
-    print(f"  ALL TESTS PASSED")
+    print("  ALL TESTS PASSED")
     print(f"{'=' * 60}")

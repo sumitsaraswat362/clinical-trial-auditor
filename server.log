@@ -34,3 +34,7 @@ INFO:     connection closed
 INFO:     127.0.0.1:53804 - "WebSocket /ws" [accepted]
 INFO:     connection open
 INFO:     connection closed
+INFO:     127.0.0.1:56934 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56965 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     connection closed

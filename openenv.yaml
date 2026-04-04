@@ -1,27 +1,29 @@
 name: clinical_trial_auditor
-version: "2.0.0"
+version: "3.0.0"
 description: >
-  A production-grade Reinforcement Learning environment for medical AI alignment.
-  The agent acts as a Senior Clinical Data Manager, utilizing a strict multi-phase 
-  workflow (Investigation → Flagging → Reporting) to identify syntactic errors, 
-  temporal violations, and multi-dimensional intersectional bias in trial datasets.
+  A protocol-aware clinical audit benchmark for OpenEnv. The agent acts as a Senior
+  Clinical Data Manager and must read an episode-specific protocol excerpt, audit
+  tabular patient records against dynamic eligibility and timing rules, and decide
+  whether suspicious subgroup outcomes represent actionable control-arm bias or a
+  confounded high-risk cohort.
 author: Sumit Saraswat
 tags:
   - openenv
   - clinical
-  - rl-benchmark
-  - medical-bias
+  - benchmark
+  - protocol-reasoning
+  - bias-audit
   - ai-safety
 tasks:
   - id: task_easy
-    name: Syntactic Cleaning
+    name: Dynamic Eligibility Screening
     difficulty: easy
-    description: Investigate dataset distribution and flag patients with invalid age values (out of 18-120 range or null).
+    description: Read the protocol excerpt for the episode and flag patients whose ages violate the protocol-specific eligibility range.
   - id: task_medium
-    name: Temporal Consistency
+    name: Protocol Timeline Audit
     difficulty: medium
-    description: Investigate temporal variables and flag patients where death_date precedes treatment_start.
+    description: Audit dynamic age eligibility, death-before-treatment errors, and treatment-start window violations with a Stage IV timing exception.
   - id: task_hard
-    name: Equity Bias Audit
+    name: Equity + Protocol Audit
     difficulty: hard
-    description: Perform multi-dimensional statistical analysis to detect intersectional selection bias affecting minority control group outcomes.
+    description: Audit record-level protocol issues and determine whether control-arm bias is genuinely present or only confounded by a high-risk outreach cohort.
