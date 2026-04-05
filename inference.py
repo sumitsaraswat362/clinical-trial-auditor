@@ -39,9 +39,11 @@ except ImportError:
     ClinicalTrialAuditorEnvironment = None
 
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+HF_TOKEN = os.getenv("HF_TOKEN")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+API_KEY = HF_TOKEN or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
 BASELINE_SEED = int(os.getenv("BASELINE_SEED", "20260402"))
 
@@ -65,6 +67,21 @@ TASK_SPECS = {
         "distributions": ["ethnicity", "gender", "outcome"],
     },
 }
+
+
+def log_start(task_id: str) -> None:
+    print(f"[START] task={task_id} env=clinical_trial_auditor model={MODEL_NAME}")
+
+
+def log_step(step: int, action_type: str, reward: float, done: bool) -> None:
+    is_done = str(done).lower()
+    print(f"[STEP] step={step} action={action_type} reward={reward:.2f} done={is_done} error=null")
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    is_success = str(success).lower()
+    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards) if rewards else "0.00"
+    print(f"[END] success={is_success} steps={steps} score={score:.2f} rewards={rewards_str}")
 
 
 @dataclass
@@ -485,6 +502,7 @@ def run_naive_task(client: Optional[OpenAI], task_id: str, task_name: str, seed:
     print("  " + "-" * 54)
     metrics = MetricsTracker()
     final_score = 0.0
+    rewards: list[float] = []
 
     with open_env_session() as env:
         result = env.reset(task_id=task_id, seed=seed)
@@ -494,6 +512,7 @@ def run_naive_task(client: Optional[OpenAI], task_id: str, task_name: str, seed:
         max_steps = obs["attempts_remaining"]
         rules = ProtocolParser.parse(protocol_excerpt)
         print(f"  Protocol: {rules.protocol_title} | Patients: {len(dataset)} | Max steps: {max_steps}")
+        log_start(task_id)
 
         sample = dataset[:24]
         guessed_findings: list[Finding] = []
@@ -590,9 +609,12 @@ def run_naive_task(client: Optional[OpenAI], task_id: str, task_name: str, seed:
             result = env.step(action)
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
+            step_reward = float(result.reward or 0.0)
+            rewards.append(step_reward)
             metrics.steps += 1
             if action.action_type == "flag_error":
                 metrics.record(obs["feedback"])
+            log_step(metrics.steps, action.action_type, step_reward, result.done)
 
         if not result.done:
             result = env.step(
@@ -607,8 +629,12 @@ def run_naive_task(client: Optional[OpenAI], task_id: str, task_name: str, seed:
             )
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
+            step_reward = float(result.reward or 0.0)
+            rewards.append(step_reward)
             metrics.steps += 1
+            log_step(metrics.steps, "submit_report", step_reward, result.done)
 
+    log_end(final_score > 0.0, metrics.steps, final_score, rewards)
     print(metrics.summary())
     return final_score, metrics
 
@@ -618,6 +644,7 @@ def run_heuristic_task(client_unused: Optional[OpenAI], task_id: str, task_name:
     print("  " + "-" * 54)
     metrics = MetricsTracker()
     final_score = 0.0
+    rewards: list[float] = []
 
     with open_env_session() as env:
         result = env.reset(task_id=task_id, seed=seed)
@@ -626,6 +653,7 @@ def run_heuristic_task(client_unused: Optional[OpenAI], task_id: str, task_name:
         rules = ProtocolParser.parse(obs["trial_protocol_excerpt"])
         max_steps = obs["attempts_remaining"]
         print(f"  Protocol: {rules.protocol_title} | Patients: {len(dataset)} | Max steps: {max_steps}")
+        log_start(task_id)
 
         actions: list[AuditAction] = []
         for variable in TASK_SPECS[task_id]["investigations"]:
@@ -662,9 +690,12 @@ def run_heuristic_task(client_unused: Optional[OpenAI], task_id: str, task_name:
             result = env.step(action)
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
+            step_reward = float(result.reward or 0.0)
+            rewards.append(step_reward)
             metrics.steps += 1
             if action.action_type == "flag_error":
                 metrics.record(obs["feedback"])
+            log_step(metrics.steps, action.action_type, step_reward, result.done)
 
         if not result.done:
             result = env.step(
@@ -678,8 +709,12 @@ def run_heuristic_task(client_unused: Optional[OpenAI], task_id: str, task_name:
             )
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
+            step_reward = float(result.reward or 0.0)
+            rewards.append(step_reward)
             metrics.steps += 1
+            log_step(metrics.steps, "submit_report", step_reward, result.done)
 
+    log_end(final_score > 0.0, metrics.steps, final_score, rewards)
     print(metrics.summary())
     return final_score, metrics
 
@@ -690,6 +725,7 @@ def run_full_task(client: Optional[OpenAI], task_id: str, task_name: str, seed: 
     print("  " + "-" * 54)
     metrics = MetricsTracker()
     final_score = 0.0
+    rewards: list[float] = []
 
     with open_env_session() as env:
         result = env.reset(task_id=task_id, seed=seed)
@@ -698,6 +734,7 @@ def run_full_task(client: Optional[OpenAI], task_id: str, task_name: str, seed: 
         rules = ProtocolParser.parse(obs["trial_protocol_excerpt"])
         max_steps = obs["attempts_remaining"]
         print(f"  Protocol: {rules.protocol_title} | Patients: {len(dataset)} | Max steps: {max_steps}")
+        log_start(task_id)
         print(
             f"  Rules: age {rules.age_min}-{rules.age_max} | standard <= {rules.treatment_window_days}d | "
             f"stage IV <= {rules.stage_iv_window_days}d"
@@ -770,9 +807,12 @@ def run_full_task(client: Optional[OpenAI], task_id: str, task_name: str, seed: 
             result = env.step(action)
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
+            step_reward = float(result.reward or 0.0)
+            rewards.append(step_reward)
             metrics.steps += 1
             if action.action_type == "flag_error":
                 metrics.record(obs["feedback"])
+            log_step(metrics.steps, action.action_type, step_reward, result.done)
             if action.action_type == "flag_error" or metrics.steps <= 5:
                 fb = obs['feedback'][:80]
                 tag = "✓" if "✓" in obs['feedback'] else "✗" if "✗" in obs['feedback'] else "→"
@@ -782,9 +822,13 @@ def run_full_task(client: Optional[OpenAI], task_id: str, task_name: str, seed: 
             result = env.step(AuditAction(action_type="submit_report", report=report))
             obs = result.observation.model_dump()
             final_score = obs["score_so_far"]
+            step_reward = float(result.reward or 0.0)
+            rewards.append(step_reward)
             metrics.steps += 1
+            log_step(metrics.steps, "submit_report", step_reward, result.done)
             print(f"  Step {metrics.steps}: score={final_score:.2f} | report submitted")
 
+    log_end(final_score > 0.0, metrics.steps, final_score, rewards)
     print(metrics.summary())
     return final_score, metrics
 
