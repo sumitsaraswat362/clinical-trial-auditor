@@ -63,36 +63,36 @@ ClinicalBench fills this gap by generating a new procedural dataset and protocol
 │                    ClinicalBench Architecture                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  reset(seed, task_id)                                          │
+│  reset(seed, task_id)                                           │
 │        │                                                        │
 │        ▼                                                        │
-│  ┌──────────────────────┐    ┌─────────────────────────────┐   │
-│  │  Procedural Dataset  │───▶│  Episode-Specific Protocol  │   │
-│  │  Generator           │    │  Excerpt                    │   │
-│  │  • 300-720 patients  │    │  • Dynamic age range        │   │
-│  │  • Seeded RNG        │    │  • Variable timing windows  │   │
-│  │  • Adversarial traps │    │  • Stage IV exceptions      │   │
-│  │  • Hidden confounders│    │  • Bias thresholds          │   │
-│  └──────────────────────┘    └─────────────────────────────┘   │
+│  ┌──────────────────────┐    ┌─────────────────────────────┐    │
+│  │  Procedural Dataset  │───▶│  Episode-Specific Protocol  │    │
+│  │  Generator           │    │  Excerpt                    │    │
+│  │  • 300-720 patients  │    │  • Dynamic age range        │    │
+│  │  • Seeded RNG        │    │  • Variable timing windows  │    │
+│  │  • Adversarial traps │    │  • Stage IV exceptions      │    │
+│  │  • Hidden confounders│    │  • Bias thresholds          │    │
+│  └──────────────────────┘    └─────────────────────────────┘    │
 │        │                              │                         │
 │        ▼                              ▼                         │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │              Agent Interaction Loop                      │   │
-│  │  Thought → Tool → Observation → Flag → Report           │   │
-│  ├─────────────────────────────────────────────────────────┤   │
-│  │  investigate_pattern(var)   → distribution summary      │   │
-│  │  compute_distribution(var) → cohort breakdown           │   │
-│  │  flag_error(patient, type) → correct/false positive     │   │
-│  │  submit_report(text)       → quality score              │   │
-│  └─────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Agent Interaction Loop                     │    │
+│  │  Thought → Tool → Observation → Flag → Report           │    │
+│  ├─────────────────────────────────────────────────────────┤    │
+│  │  investigate_pattern(var)   → distribution summary      │    │
+│  │  compute_distribution(var) → cohort breakdown           │    │
+│  │  flag_error(patient, type) → correct/false positive     │    │
+│  │  submit_report(text)       → quality score              │    │
+│  └─────────────────────────────────────────────────────────┘    │
 │        │                                                        │
 │        ▼                                                        │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │              Multi-Dimensional Grading                   │   │
-│  │  Recall (70%) + Precision (15%) + Workflow (5%)         │   │
-│  │  + Efficiency (5%) + Report Quality (5%)                │   │
-│  │  Dense step rewards + episode benchmark score           │   │
-│  └─────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Multi-Dimensional Grading                  │    │
+│  │  Recall (70%) + Precision (15%) + Workflow (5%)         │    │
+│  │  + Efficiency (5%) + Report Quality (5%)                │    │
+│  │  Dense step rewards + episode benchmark score           │    │
+│  └─────────────────────────────────────────────────────────┘    │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
