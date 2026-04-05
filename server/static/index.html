@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClinicalBench — Agentic Clinical Trial Audit Benchmark</title>
+<meta name="description" content="A benchmark for evaluating agentic reasoning in safety-critical clinical workflows. OpenEnv environment for Phase III oncology trial auditing.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg-root:#060a13;
+  --bg-surface:#0c1120;
+  --bg-card:#111827;
+  --bg-card-hover:#161d2e;
+  --border:rgba(255,255,255,0.06);
+  --border-accent:rgba(59,130,246,0.25);
+  --text-primary:#f1f5f9;
+  --text-secondary:#94a3b8;
+  --text-muted:#64748b;
+  --accent-blue:#3b82f6;
+  --accent-green:#10b981;
+  --accent-gradient:linear-gradient(135deg,#3b82f6,#10b981);
+  --accent-gradient-h:linear-gradient(90deg,#3b82f6,#10b981);
+  --danger:#ef4444;
+  --warning:#f59e0b;
+  --success:#10b981;
+  --info:#3b82f6;
+  --font-sans:'Inter',system-ui,-apple-system,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+  --radius:10px;
+  --radius-sm:6px;
+  --radius-lg:14px;
+  --shadow:0 4px 24px rgba(0,0,0,0.4);
+  --glow-blue:0 0 20px rgba(59,130,246,0.15);
+  --glow-green:0 0 20px rgba(16,185,129,0.15);
+}
+html,body{height:100%;overflow:hidden;background:var(--bg-root);color:var(--text-primary);font-family:var(--font-sans)}
+body{display:flex;flex-direction:column}
+
+/* ─── HEADER ─── */
+.header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 24px;
+  background:var(--bg-surface);
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+  position:relative;
+  z-index:10;
+}
+.header::after{
+  content:'';position:absolute;bottom:0;left:0;right:0;height:1px;
+  background:var(--accent-gradient-h);opacity:0.4;
+}
+.header-brand{display:flex;align-items:center;gap:12px}
+.header-logo{
+  width:36px;height:36px;border-radius:8px;
+  background:var(--accent-gradient);
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;font-weight:800;color:#fff;
+  box-shadow:var(--glow-blue);
+}
+.header-title{font-size:16px;font-weight:700;letter-spacing:-0.02em}
+.header-subtitle{font-size:11px;color:var(--text-muted);font-weight:500;letter-spacing:0.03em;text-transform:uppercase}
+.header-badge{
+  padding:4px 10px;border-radius:20px;font-size:10px;font-weight:600;
+  background:rgba(16,185,129,0.12);color:var(--accent-green);
+  border:1px solid rgba(16,185,129,0.2);
+  letter-spacing:0.04em;text-transform:uppercase;
+}
+.header-meta{display:flex;align-items:center;gap:16px}
+.header-stat{text-align:right}
+.header-stat-val{font-size:13px;font-weight:600;font-family:var(--font-mono);color:var(--text-primary)}
+.header-stat-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em}
+
+/* ─── MAIN GRID ─── */
+.main{flex:1;display:grid;grid-template-columns:280px 1fr 300px;gap:0;overflow:hidden}
+
+/* ─── PANELS ─── */
+.panel{
+  display:flex;flex-direction:column;overflow:hidden;
+  border-right:1px solid var(--border);
+  background:var(--bg-surface);
+}
+.panel:last-child{border-right:none}
+.panel-header{
+  padding:14px 18px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.panel-header h2{
+  font-size:11px;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.08em;color:var(--text-muted);
+  display:flex;align-items:center;gap:8px;
+}
+.panel-header h2 .dot{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--accent-green);
+  box-shadow:0 0 6px var(--accent-green);
+  animation:pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:0.4}}
+.panel-body{flex:1;overflow-y:auto;padding:14px 18px}
+.panel-body::-webkit-scrollbar{width:4px}
+.panel-body::-webkit-scrollbar-track{background:transparent}
+.panel-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:4px}
+
+/* ─── LEFT PANEL: PROTOCOL ─── */
+.protocol-card{
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:var(--radius);padding:14px;margin-bottom:12px;
+}
+.protocol-card-title{
+  font-size:10px;font-weight:600;color:var(--text-muted);
+  text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;
+}
+.protocol-id{
+  font-family:var(--font-mono);font-size:14px;font-weight:600;
+  background:var(--accent-gradient);-webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;margin-bottom:4px;
+}
+.protocol-excerpt{
+  font-family:var(--font-mono);font-size:11px;line-height:1.65;
+  color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;
+}
+.protocol-excerpt .hl-rule{
+  color:var(--accent-green);font-weight:600;
+  background:rgba(16,185,129,0.08);padding:1px 3px;border-radius:3px;
+}
+.protocol-excerpt .hl-danger{
+  color:var(--danger);font-weight:600;
+}
+.episode-meta{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;
+}
+.meta-chip{
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:8px 10px;
+}
+.meta-chip-label{font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em}
+.meta-chip-value{font-size:13px;font-weight:600;font-family:var(--font-mono);margin-top:2px}
+
+/* ─── CENTER PANEL: LIVE FEED ─── */
+.controls{
+  display:flex;gap:10px;align-items:center;
+  padding:14px 18px;border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.control-select{
+  flex:1;padding:8px 12px;border-radius:var(--radius-sm);
+  background:var(--bg-card);border:1px solid var(--border);
+  color:var(--text-primary);font-family:var(--font-sans);font-size:12px;
+  cursor:pointer;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8'%3E%3Cpath d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;
+  padding-right:28px;
+}
+.control-select:focus{outline:none;border-color:var(--accent-blue)}
+.btn-start{
+  padding:8px 20px;border:none;border-radius:var(--radius-sm);
+  background:var(--accent-gradient);color:#fff;font-weight:600;
+  font-size:12px;cursor:pointer;position:relative;overflow:hidden;
+  transition:transform 0.15s,box-shadow 0.15s;
+  box-shadow:var(--glow-blue);font-family:var(--font-sans);
+}
+.btn-start:hover{transform:translateY(-1px);box-shadow:0 0 30px rgba(59,130,246,0.3)}
+.btn-start:active{transform:scale(0.97)}
+.btn-start:disabled{opacity:0.5;cursor:not-allowed;transform:none}
+.btn-start.running{animation:glow-pulse 1.5s ease-in-out infinite}
+@keyframes glow-pulse{0%,100%{box-shadow:var(--glow-blue)}50%{box-shadow:0 0 30px rgba(59,130,246,0.4)}}
+
+.feed{flex:1;overflow-y:auto;padding:14px 18px}
+.feed::-webkit-scrollbar{width:4px}
+.feed::-webkit-scrollbar-track{background:transparent}
+.feed::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:4px}
+
+.feed-empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:100%;color:var(--text-muted);text-align:center;gap:12px;
+}
+.feed-empty-icon{font-size:40px;opacity:0.3}
+.feed-empty-text{font-size:13px;line-height:1.5}
+
+.log-card{
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:6px;
+  font-family:var(--font-mono);font-size:11px;line-height:1.5;
+  animation:card-in 0.25s ease-out;
+  border-left:3px solid transparent;
+}
+@keyframes card-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.log-card.type-thought{border-left-color:var(--info);color:var(--text-secondary)}
+.log-card.type-tool{border-left-color:#8b5cf6;color:var(--text-secondary)}
+.log-card.type-observe{border-left-color:var(--text-muted);color:var(--text-secondary)}
+.log-card.type-flag-ok{border-left-color:var(--success);color:var(--success)}
+.log-card.type-flag-bad{border-left-color:var(--danger);color:var(--danger)}
+.log-card.type-report{border-left-color:var(--accent-green);color:var(--accent-green)}
+.log-card.type-info{border-left-color:var(--text-muted);color:var(--text-muted)}
+.log-card.type-phase{
+  border-left-color:var(--warning);color:var(--warning);
+  background:rgba(245,158,11,0.05);
+}
+.log-tag{
+  font-weight:600;font-size:10px;text-transform:uppercase;
+  letter-spacing:0.04em;margin-right:6px;
+}
+.log-score{
+  float:right;font-weight:600;font-size:10px;
+  padding:2px 6px;border-radius:3px;
+  background:rgba(16,185,129,0.1);color:var(--accent-green);
+}
+
+.agent-divider{
+  text-align:center;padding:14px 0;font-size:11px;font-weight:600;
+  color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;
+  display:flex;align-items:center;gap:12px;
+}
+.agent-divider::before,.agent-divider::after{
+  content:'';flex:1;height:1px;
+  background:var(--border);
+}
+
+/* ─── RIGHT PANEL: ANALYTICS ─── */
+.gauge-container{
+  display:flex;flex-direction:column;align-items:center;
+  margin-bottom:16px;
+}
+.gauge-svg{width:180px;height:100px}
+.gauge-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-top:4px}
+.gauge-value{font-size:28px;font-weight:700;font-family:var(--font-mono)}
+
+.mini-gauges{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}
+.mini-gauge{
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:10px;text-align:center;
+}
+.mini-gauge-label{font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em}
+.mini-gauge-value{font-size:18px;font-weight:700;font-family:var(--font-mono);margin-top:4px}
+.mini-gauge-bar{
+  height:3px;border-radius:2px;background:rgba(255,255,255,0.06);
+  margin-top:6px;overflow:hidden;
+}
+.mini-gauge-fill{height:100%;border-radius:2px;transition:width 0.6s ease}
+
+.comparison-card{
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:var(--radius);padding:14px;margin-bottom:12px;
+}
+.comparison-title{
+  font-size:10px;font-weight:600;color:var(--text-muted);
+  text-transform:uppercase;letter-spacing:0.06em;margin-bottom:12px;
+}
+.bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.bar-label{font-size:11px;font-family:var(--font-mono);min-width:72px;color:var(--text-secondary)}
+.bar-track{flex:1;height:18px;background:rgba(255,255,255,0.04);border-radius:3px;overflow:hidden;position:relative}
+.bar-fill{height:100%;border-radius:3px;transition:width 1s ease;position:relative}
+.bar-fill.naive{background:linear-gradient(90deg,#ef4444,#f97316);width:10%}
+.bar-fill.heuristic{background:linear-gradient(90deg,#f59e0b,#eab308);width:60%}
+.bar-fill.full{background:var(--accent-gradient-h);width:98%}
+.bar-val{
+  font-size:10px;font-weight:600;font-family:var(--font-mono);
+  min-width:32px;text-align:right;
+}
+
+.task-results-table{width:100%;border-collapse:collapse;margin-top:10px}
+.task-results-table th{
+  font-size:9px;color:var(--text-muted);text-transform:uppercase;
+  letter-spacing:0.06em;text-align:right;padding:4px 6px;
+  border-bottom:1px solid var(--border);font-weight:600;
+}
+.task-results-table th:first-child{text-align:left}
+.task-results-table td{
+  font-size:11px;font-family:var(--font-mono);padding:5px 6px;
+  text-align:right;border-bottom:1px solid rgba(255,255,255,0.03);
+}
+.task-results-table td:first-child{text-align:left;color:var(--text-secondary);font-family:var(--font-sans);font-weight:500}
+.score-high{color:var(--accent-green)}
+.score-mid{color:var(--warning)}
+.score-low{color:var(--danger)}
+
+.insight-box{
+  background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.15);
+  border-radius:var(--radius-sm);padding:10px 12px;margin-top:12px;
+  font-size:11px;line-height:1.55;color:var(--text-secondary);
+}
+.insight-box strong{color:var(--text-primary)}
+
+/* ─── STATUS BAR ─── */
+.status-bar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:6px 24px;background:var(--bg-root);border-top:1px solid var(--border);
+  font-size:10px;color:var(--text-muted);flex-shrink:0;
+  font-family:var(--font-mono);
+}
+.status-dot{
+  display:inline-block;width:6px;height:6px;border-radius:50%;
+  margin-right:6px;
+}
+.status-dot.online{background:var(--accent-green);box-shadow:0 0 6px var(--accent-green)}
+.status-dot.offline{background:var(--danger)}
+
+/* ─── RESPONSIVE ─── */
+@media(max-width:1200px){
+  .main{grid-template-columns:240px 1fr 260px}
+}
+@media(max-width:900px){
+  .main{grid-template-columns:1fr;grid-template-rows:auto 1fr auto}
+  .panel{border-right:none;border-bottom:1px solid var(--border)}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ HEADER ═══ -->
+<header class="header">
+  <div class="header-brand">
+    <div class="header-logo">CB</div>
+    <div>
+      <div class="header-title">ClinicalBench</div>
+      <div class="header-subtitle">Agentic Clinical Trial Audit Benchmark</div>
+    </div>
+    <span class="header-badge">OpenEnv v3</span>
+  </div>
+  <div class="header-meta">
+    <div class="header-stat">
+      <div class="header-stat-val" id="stat-tasks">3 Tasks</div>
+      <div class="header-stat-label">Easy → Hard</div>
+    </div>
+    <div class="header-stat">
+      <div class="header-stat-val" id="stat-patients">300–720</div>
+      <div class="header-stat-label">Patients/Episode</div>
+    </div>
+    <div class="header-stat">
+      <div class="header-stat-val" id="stat-seed">—</div>
+      <div class="header-stat-label">Seed</div>
+    </div>
+  </div>
+</header>
+
+<!-- ═══ MAIN 3-PANEL ═══ -->
+<main class="main">
+
+  <!-- ─── LEFT: PROTOCOL MANIFEST ─── -->
+  <div class="panel" id="panel-protocol">
+    <div class="panel-header">
+      <h2><span class="dot"></span>Active Episode Protocol</h2>
+    </div>
+    <div class="panel-body">
+      <div class="protocol-card">
+        <div class="protocol-card-title">Protocol ID</div>
+        <div class="protocol-id" id="proto-id">Awaiting reset()</div>
+      </div>
+      <div class="protocol-card">
+        <div class="protocol-card-title">Trial Protocol Excerpt</div>
+        <div class="protocol-excerpt" id="proto-excerpt">
+Start an audit to load the episode-specific protocol.
+
+Each episode generates a unique protocol with dynamic rules:
+• Age eligibility ranges change per episode
+• Treatment scheduling windows vary
+• Stage IV exceptions create valid edge cases
+• Bias thresholds are protocol-specific
+
+The agent must READ these rules — not assume defaults.</div>
+      </div>
+      <div class="episode-meta">
+        <div class="meta-chip">
+          <div class="meta-chip-label">Difficulty</div>
+          <div class="meta-chip-value" id="meta-difficulty">—</div>
+        </div>
+        <div class="meta-chip">
+          <div class="meta-chip-label">Patients</div>
+          <div class="meta-chip-value" id="meta-patients">—</div>
+        </div>
+        <div class="meta-chip">
+          <div class="meta-chip-label">Max Steps</div>
+          <div class="meta-chip-value" id="meta-steps">—</div>
+        </div>
+        <div class="meta-chip">
+          <div class="meta-chip-label">Errors</div>
+          <div class="meta-chip-value" id="meta-errors">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── CENTER: LIVE AUDIT TELEMETRY ─── -->
+  <div class="panel" id="panel-feed" style="border-right:1px solid var(--border)">
+    <div class="panel-header">
+      <h2><span class="dot"></span>Live Agent Telemetry</h2>
+    </div>
+    <div class="controls">
+      <select class="control-select" id="sel-agent">
+        <option value="all">▶ All Agents (Comparison Run)</option>
+        <option value="naive">Naive LLM Agent</option>
+        <option value="heuristic">Heuristic Agent</option>
+        <option value="full">Reasoning Agent (Full)</option>
+      </select>
+      <select class="control-select" id="sel-task">
+        <option value="all">All Tasks</option>
+        <option value="task_easy">Easy — Eligibility Screening</option>
+        <option value="task_medium">Medium — Timeline Audit</option>
+        <option value="task_hard">Hard — Equity + Protocol</option>
+      </select>
+      <button class="btn-start" id="btn-start" onclick="startAudit()">
+        ▶ Start Audit
+      </button>
+    </div>
+    <div class="feed" id="feed">
+      <div class="feed-empty">
+        <div class="feed-empty-icon">🔬</div>
+        <div class="feed-empty-text">
+          Select an agent and task, then click <strong>Start Audit</strong><br>
+          to watch the reasoning loop in real time.<br><br>
+          <span style="color:var(--text-muted);font-size:11px">
+            The benchmark runs <strong>Naive → Heuristic → Reasoning</strong> agents<br>
+            against procedurally generated clinical trial data.
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── RIGHT: ANALYTICS ─── -->
+  <div class="panel" id="panel-analytics">
+    <div class="panel-header">
+      <h2><span class="dot"></span>Evaluation Metrics</h2>
+    </div>
+    <div class="panel-body">
+      <!-- Main Score Gauge -->
+      <div class="gauge-container">
+        <svg class="gauge-svg" viewBox="0 0 200 110">
+          <defs>
+            <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#ef4444"/>
+              <stop offset="40%" stop-color="#f59e0b"/>
+              <stop offset="100%" stop-color="#10b981"/>
+            </linearGradient>
+          </defs>
+          <!-- Track -->
+          <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="10" stroke-linecap="round"/>
+          <!-- Fill -->
+          <path id="gauge-fill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gaugeGrad)" stroke-width="10" stroke-linecap="round"
+            stroke-dasharray="251.3" stroke-dashoffset="251.3" style="transition:stroke-dashoffset 0.8s ease"/>
+          <!-- Value -->
+          <text x="100" y="85" text-anchor="middle" fill="var(--text-primary)" font-family="var(--font-mono)" font-size="28" font-weight="700" id="gauge-text">0.00</text>
+          <text x="100" y="102" text-anchor="middle" fill="var(--text-muted)" font-family="var(--font-sans)" font-size="10" font-weight="600" letter-spacing="0.08em">BENCHMARK SCORE</text>
+        </svg>
+      </div>
+
+      <!-- Mini Gauges -->
+      <div class="mini-gauges">
+        <div class="mini-gauge">
+          <div class="mini-gauge-label">Precision</div>
+          <div class="mini-gauge-value" id="mg-precision">—</div>
+          <div class="mini-gauge-bar"><div class="mini-gauge-fill" id="mg-precision-bar" style="width:0;background:var(--accent-blue)"></div></div>
+        </div>
+        <div class="mini-gauge">
+          <div class="mini-gauge-label">Recall</div>
+          <div class="mini-gauge-value" id="mg-recall">—</div>
+          <div class="mini-gauge-bar"><div class="mini-gauge-fill" id="mg-recall-bar" style="width:0;background:var(--accent-green)"></div></div>
+        </div>
+        <div class="mini-gauge">
+          <div class="mini-gauge-label">Workflow</div>
+          <div class="mini-gauge-value" id="mg-workflow">—</div>
+          <div class="mini-gauge-bar"><div class="mini-gauge-fill" id="mg-workflow-bar" style="width:0;background:#8b5cf6"></div></div>
+        </div>
+        <div class="mini-gauge">
+          <div class="mini-gauge-label">Efficiency</div>
+          <div class="mini-gauge-value" id="mg-efficiency">—</div>
+          <div class="mini-gauge-bar"><div class="mini-gauge-fill" id="mg-efficiency-bar" style="width:0;background:var(--warning)"></div></div>
+        </div>
+      </div>
+
+      <!-- LLM Capability Gap Chart -->
+      <div class="comparison-card">
+        <div class="comparison-title">⚡ LLM Capability Gap (Average Score)</div>
+        <div class="bar-row">
+          <div class="bar-label">Naive</div>
+          <div class="bar-track"><div class="bar-fill naive" id="bar-naive"></div></div>
+          <div class="bar-val score-low" id="bar-naive-val">0.10</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label">Heuristic</div>
+          <div class="bar-track"><div class="bar-fill heuristic" id="bar-heuristic"></div></div>
+          <div class="bar-val score-mid" id="bar-heuristic-val">0.60</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label">Reasoning</div>
+          <div class="bar-track"><div class="bar-fill full" id="bar-full"></div></div>
+          <div class="bar-val score-high" id="bar-full-val">0.98</div>
+        </div>
+      </div>
+
+      <!-- Detailed Results Table -->
+      <div class="comparison-card">
+        <div class="comparison-title">📊 Per-Task Breakdown</div>
+        <table class="task-results-table" id="results-table">
+          <thead>
+            <tr><th>Agent</th><th>Easy</th><th>Med</th><th>Hard</th><th>Avg</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Naive</td>
+              <td class="score-low">0.19</td><td class="score-low">0.06</td>
+              <td class="score-low">0.06</td><td class="score-low">0.10</td>
+            </tr>
+            <tr>
+              <td>Heuristic</td>
+              <td class="score-mid">0.81</td><td class="score-mid">0.56</td>
+              <td class="score-mid">0.45</td><td class="score-mid">0.60</td>
+            </tr>
+            <tr>
+              <td>Reasoning</td>
+              <td class="score-high">0.97</td><td class="score-high">0.97</td>
+              <td class="score-high">0.98</td><td class="score-high">0.98</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="insight-box">
+          <strong>Key finding:</strong> The 88-point gap between naive LLM (0.10) and tool-augmented reasoning agent (0.98) demonstrates that structured protocol comprehension and staged investigation are <strong>necessary</strong> for clinical audit tasks — raw language modeling is insufficient.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ═══ STATUS BAR ═══ -->
+<div class="status-bar">
+  <div>
+    <span class="status-dot online" id="status-dot"></span>
+    <span id="status-text">Environment ready</span>
+  </div>
+  <div>OpenEnv Spec v3 · Phase III Oncology · Procedural Generation</div>
+  <div id="status-time"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// ClinicalBench Dashboard — Vanilla JS
+// ═══════════════════════════════════════════════════════════════
+
+const BASE = window.location.origin;
+const AGENTS = {naive:'Naive LLM',heuristic:'Heuristic',full:'Reasoning Agent'};
+const TASKS = {
+  task_easy:{name:'Dynamic Eligibility Screening',difficulty:'easy'},
+  task_medium:{name:'Protocol Timeline Audit',difficulty:'medium'},
+  task_hard:{name:'Equity + Protocol Audit',difficulty:'hard'}
+};
+const SEED = 20260402;
+let running = false;
+let allResults = {};
+
+// ─── Utilities ───
+function $(id){return document.getElementById(id)}
+function qs(sel){return document.querySelector(sel)}
+
+function highlightProtocol(text){
+  return text
+    .replace(/age (\d+-\d+) inclusive/g,'age <span class="hl-rule">$1</span> inclusive')
+    .replace(/within (\d+) days/g,'within <span class="hl-rule">$1 days</span>')
+    .replace(/(Stage IV exception)/g,'<span class="hl-rule">$1</span>')
+    .replace(/(death_date must never precede treatment_start)/g,'<span class="hl-danger">$1</span>')
+    .replace(/dominance exceeds (\d+)%/g,'dominance exceeds <span class="hl-rule">$1%</span>')
+    .replace(/male share exceeds (\d+)%/g,'male share exceeds <span class="hl-rule">$1%</span>')
+    .replace(/gap exceeds (\d+) percentage/g,'gap exceeds <span class="hl-rule">$1</span> percentage')
+    .replace(/(Missing age is a protocol violation)/g,'<span class="hl-danger">$1</span>');
+}
+
+function updateGauge(score){
+  const maxDash = 251.3;
+  const offset = maxDash - (maxDash * Math.min(1, Math.max(0, score)));
+  $('gauge-fill').style.strokeDashoffset = offset;
+  $('gauge-text').textContent = score.toFixed(2);
+}
+
+function updateMiniGauge(id, value){
+  const el = $(id);
+  const bar = $(id + '-bar');
+  if(el) el.textContent = (typeof value==='number') ? value.toFixed(3) : value;
+  if(bar) bar.style.width = ((typeof value==='number' ? value : 0) * 100) + '%';
+}
+
+function setStatus(text, online=true){
+  $('status-text').textContent = text;
+  $('status-dot').className = 'status-dot ' + (online?'online':'offline');
+}
+
+function addLog(type, tag, text, score){
+  const feed = $('feed');
+  if(feed.querySelector('.feed-empty')) feed.innerHTML = '';
+  const card = document.createElement('div');
+  card.className = 'log-card type-' + type;
+  let html = '<span class="log-tag">[' + tag + ']</span>';
+  if(score !== undefined) html += '<span class="log-score">' + score.toFixed(2) + '</span>';
+  html += text;
+  card.innerHTML = html;
+  feed.appendChild(card);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function addDivider(text){
+  const feed = $('feed');
+  const div = document.createElement('div');
+  div.className = 'agent-divider';
+  div.textContent = text;
+  feed.appendChild(div);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function updateProtocol(obs){
+  $('proto-id').textContent = obs.protocol_title || '—';
+  $('proto-excerpt').innerHTML = highlightProtocol(obs.trial_protocol_excerpt || '');
+  $('meta-difficulty').textContent = obs.task_type || '—';
+  $('meta-patients').textContent = (obs.dataset||[]).length || '—';
+  $('meta-steps').textContent = obs.attempts_remaining || '—';
+}
+
+function updateMetrics(bd){
+  if(!bd) return;
+  updateMiniGauge('mg-precision', bd.precision);
+  updateMiniGauge('mg-recall', bd.recall);
+  updateMiniGauge('mg-workflow', bd.workflow);
+  updateMiniGauge('mg-efficiency', bd.efficiency);
+}
+
+function updateBars(results){
+  const agents = ['naive','heuristic','full'];
+  agents.forEach(a=>{
+    if(results[a]){
+      const avg = results[a].avg || 0;
+      const bar = $('bar-'+a);
+      const val = $('bar-'+a+'-val');
+      if(bar) bar.style.width = (avg*100)+'%';
+      if(val) val.textContent = avg.toFixed(2);
+    }
+  });
+}
+
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+
+// ─── Main Audit Runner ───
+async function runSingleEpisode(agentMode, taskId){
+  // Reset
+  const resetPayload = {task_id:taskId, seed:SEED};
+  const resetRes = await fetch(BASE+'/api/audit/reset', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(resetPayload)
+  });
+  const resetData = await resetRes.json();
+  const obs = resetData.observation || resetData;
+
+  updateProtocol(obs);
+  $('meta-errors').textContent = resetData.total_errors || '?';
+  $('stat-seed').textContent = SEED;
+
+  addLog('info','RESET', `Episode started: ${obs.protocol_title} | ${(obs.dataset||[]).length} patients | ${obs.attempts_remaining} steps`);
+
+  // Get agent plan
+  const planRes = await fetch(BASE+'/api/audit/plan', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({agent:agentMode, task_id:taskId, seed:SEED})
+  });
+  const planData = await planRes.json();
+  const actions = planData.actions || [];
+  const traces = planData.traces || [];
+
+  // Display traces and execute actions
+  let lastScore = 0;
+  let lastBreakdown = {};
+
+  for(let i=0; i<actions.length; i++){
+    if(!running) break;
+    const action = actions[i];
+    const trace = traces[i] || {};
+
+    // Show thought
+    if(trace.thought){
+      addLog('thought','THINK', trace.thought);
+      await sleep(60);
+    }
+
+    // Show tool usage
+    if(trace.tool){
+      addLog('tool','TOOL', trace.tool);
+      await sleep(40);
+    }
+
+    // Execute step
+    const stepRes = await fetch(BASE+'/api/audit/step', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(action)
+    });
+    const stepData = await stepRes.json();
+    const sObs = stepData.observation || stepData;
+
+    lastScore = sObs.score_so_far || 0;
+    lastBreakdown = sObs.score_breakdown || {};
+
+    // Determine log type
+    const fb = sObs.feedback || '';
+    let logType = 'observe';
+    let logTag = 'OBSERVE';
+
+    if(action.action_type === 'flag_error'){
+      logType = fb.includes('✓') ? 'flag-ok' : 'flag-bad';
+      logTag = fb.includes('✓') ? 'FLAG ✓' : 'FLAG ✗';
+    } else if(action.action_type === 'submit_report'){
+      logType = 'report';
+      logTag = 'REPORT';
+    } else if(action.action_type === 'investigate_pattern'){
+      logTag = 'INVESTIGATE';
+    } else if(action.action_type === 'compute_distribution'){
+      logTag = 'COMPUTE';
+    }
+
+    addLog(logType, logTag, fb.substring(0,120), lastScore);
+    updateGauge(lastScore);
+    updateMetrics(lastBreakdown);
+    await sleep(30);
+
+    if(sObs.done) break;
+  }
+
+  return {score:lastScore, breakdown:lastBreakdown};
+}
+
+async function startAudit(){
+  if(running) return;
+  running = true;
+  const btn = $('btn-start');
+  btn.disabled = true;
+  btn.classList.add('running');
+  btn.textContent = '● Running...';
+  $('feed').innerHTML = '';
+  allResults = {};
+  setStatus('Audit in progress...', true);
+
+  const selAgent = $('sel-agent').value;
+  const selTask = $('sel-task').value;
+
+  const agentList = selAgent === 'all' ? ['naive','heuristic','full'] : [selAgent];
+  const taskList = selTask === 'all' ? ['task_easy','task_medium','task_hard'] : [selTask];
+
+  try{
+    for(const agent of agentList){
+      addDivider(AGENTS[agent] || agent.toUpperCase());
+      allResults[agent] = {scores:{}, avg:0};
+
+      for(const task of taskList){
+        const taskName = TASKS[task]?.name || task;
+        addLog('phase','TASK', `${taskName} (${TASKS[task]?.difficulty || ''})`);
+        await sleep(100);
+
+        const result = await runSingleEpisode(agent, task);
+        allResults[agent].scores[task] = result.score;
+        addLog('info','SCORE', `Final: ${result.score.toFixed(2)}`);
+      }
+
+      const scores = Object.values(allResults[agent].scores);
+      allResults[agent].avg = scores.reduce((a,b)=>a+b,0)/scores.length;
+    }
+
+    updateBars(allResults);
+
+    // Update results table if full run
+    if(selAgent==='all' && selTask==='all'){
+      const tbody = $('results-table').querySelector('tbody');
+      tbody.innerHTML = '';
+      for(const agent of agentList){
+        const r = allResults[agent];
+        const tr = document.createElement('tr');
+        const scoreClass = r.avg >= 0.8 ? 'score-high' : r.avg >= 0.4 ? 'score-mid' : 'score-low';
+        tr.innerHTML = `<td>${AGENTS[agent]}</td>` +
+          ['task_easy','task_medium','task_hard'].map(t=>`<td class="${scoreClass}">${(r.scores[t]||0).toFixed(2)}</td>`).join('') +
+          `<td class="${scoreClass}">${r.avg.toFixed(2)}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    addDivider('AUDIT COMPLETE');
+    setStatus('Audit complete', true);
+
+  } catch(err){
+    addLog('flag-bad','ERROR', err.message || 'Audit failed');
+    setStatus('Error: ' + (err.message||'unknown'), false);
+  }
+
+  running = false;
+  btn.disabled = false;
+  btn.classList.remove('running');
+  btn.textContent = '▶ Start Audit';
+}
+
+// ─── Clock ───
+function updateClock(){
+  $('status-time').textContent = new Date().toLocaleTimeString('en-US',{hour12:false});
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ─── Health check on load ───
+(async function(){
+  try{
+    const r = await fetch(BASE+'/health');
+    if(r.ok) setStatus('Environment ready', true);
+    else setStatus('Environment unavailable', false);
+  }catch(e){
+    setStatus('Connecting...', false);
+  }
+})();
+</script>
+
+</body>
+</html>

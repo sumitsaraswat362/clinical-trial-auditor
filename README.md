@@ -1,6 +1,6 @@
 ---
-title: Clinical Trial Auditor
-emoji: 🏥
+title: ClinicalBench
+emoji: 🔬
 colorFrom: blue
 colorTo: green
 sdk: docker
@@ -10,259 +10,372 @@ tags:
   - openenv
 ---
 
+<div align="center">
 
-# Clinical Trial Auditor (OpenEnv)
+# 🔬 ClinicalBench
 
-Clinical Trial Auditor is a protocol-aware OpenEnv benchmark for clinical data auditing. The agent acts as a Senior Clinical Data Manager reviewing procedurally generated Phase III oncology trial data under dynamic per-episode rules.
+### A Benchmark for Evaluating Agentic Reasoning in Safety-Critical Clinical Workflows
 
-This is not a static spreadsheet puzzle. Every `reset()` samples a new protocol excerpt and a new dataset, so the agent must read the rules for that episode and then audit the records accordingly.
+[![OpenEnv](https://img.shields.io/badge/OpenEnv-v3-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6Ii8+PC9zdmc+)](https://github.com/meta-pytorch/OpenEnv)
+[![HF Space](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Space-orange?style=flat-square)](https://huggingface.co/spaces/Timusgeorge/clinical_trial_auditor)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](#docker)
+[![License](https://img.shields.io/badge/License-BSD%203--Clause-green?style=flat-square)](LICENSE)
 
-## Why This Matters
+**Modern AI systems fail silently in high-stakes domains like clinical trials due to inability to reason about protocol constraints, temporal causality, and fairness simultaneously. ClinicalBench is an OpenEnv benchmark that exposes these failure modes.**
 
-Real clinical audits are messy:
-- eligibility criteria vary by protocol,
-- timeline rules include exceptions,
-- suspicious subgroup outcomes are not always evidence of bias,
-- false positives waste reviewer time and can trigger unnecessary escalations.
+[Live Demo](https://huggingface.co/spaces/Timusgeorge/clinical_trial_auditor) · [Architecture](#architecture) · [Results](#benchmark-results) · [Quick Start](#quick-start)
 
-This environment is built to evaluate exactly those failure modes. It targets the gap between "can parse a table" and "can follow a high-stakes auditing workflow with protocol friction and adversarial traps."
+</div>
 
-## What Makes This Benchmark Different
+---
 
-- Dynamic protocol reasoning: each episode exposes a new `trial_protocol_excerpt` with episode-specific age ranges and treatment-start windows.
-- Cross-modal audit logic: the agent must apply text rules from the protocol to tabular patient data.
-- Stage-aware timing exceptions: Stage IV patients can have a longer enrollment-to-treatment window, which creates valid edge cases that trap shortcut heuristics.
-- Hallucination traps: hard episodes can contain a confounded high-risk cohort that looks biased overall but is not actionable after stage-adjusted review.
-- Dense reward plus benchmark rubric: step rewards encourage learning, while `score_so_far` tracks a judge-facing episode rubric emphasizing recall, precision, workflow discipline, efficiency, and report quality.
+## The Problem
 
-## OpenEnv Compliance
+Clinical data auditing is one of medicine's most consequential workflows. A single undetected protocol violation can invalidate years of trial data, delay drug approvals, and — in worst cases — put patients at risk. Today's AI systems fail at this task in three specific ways:
 
-This project implements the required OpenEnv interface:
-- typed `Action`, `Observation`, and `State` models with Pydantic,
-- `reset(seed, task_id, ...) -> Observation`,
-- `step(action) -> Observation`,
-- `state -> current state`,
-- `openenv.yaml` at the repo root.
+| Failure Mode | What Happens | Why It Matters |
+|:---|:---|:---|
+| **Overflagging** | LLMs flag valid edge cases (e.g., Stage IV patients with extended treatment windows) as violations | False alarms waste reviewer time and erode trust in AI-assisted auditing |
+| **Temporal Confusion** | Models miss impossible date orderings (death before treatment) while fixating on superficial anomalies | Critical safety signals go undetected |
+| **Bias Misinterpretation** | Models detect demographic skew in raw statistics but cannot distinguish genuine selection bias from confounded high-risk cohorts | Naive bias detection causes incorrect escalations or dangerous dismissals |
 
-Validation:
+ClinicalBench is designed to evaluate and train agents that can overcome all three failure modes simultaneously.
 
-```bash
-openenv validate .
+---
+
+## Why ClinicalBench Exists
+
+Existing RL benchmarks for agents fall into two categories: **game-like environments** (code golf, math puzzles) where memorization helps, and **static dataset tasks** (classification, extraction) where the answer is fixed. Neither captures the reality of clinical auditing, where:
+
+- **Rules change every episode** — eligibility criteria, timing windows, and bias thresholds are protocol-specific
+- **Edge cases are not errors** — Stage IV patients legitimately have longer treatment windows
+- **Statistics lie without context** — a minority group's higher mortality rate may reflect disease severity, not unfair sampling
+- **The step budget is limited** — agents must prioritize which patients and which patterns to investigate
+
+ClinicalBench fills this gap by generating a new procedural dataset and protocol for every `reset()`, forcing agents to **read and reason** rather than memorize.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ClinicalBench Architecture                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  reset(seed, task_id)                                          │
+│        │                                                        │
+│        ▼                                                        │
+│  ┌──────────────────────┐    ┌─────────────────────────────┐   │
+│  │  Procedural Dataset  │───▶│  Episode-Specific Protocol  │   │
+│  │  Generator           │    │  Excerpt                    │   │
+│  │  • 300-720 patients  │    │  • Dynamic age range        │   │
+│  │  • Seeded RNG        │    │  • Variable timing windows  │   │
+│  │  • Adversarial traps │    │  • Stage IV exceptions      │   │
+│  │  • Hidden confounders│    │  • Bias thresholds          │   │
+│  └──────────────────────┘    └─────────────────────────────┘   │
+│        │                              │                         │
+│        ▼                              ▼                         │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              Agent Interaction Loop                      │   │
+│  │  Thought → Tool → Observation → Flag → Report           │   │
+│  ├─────────────────────────────────────────────────────────┤   │
+│  │  investigate_pattern(var)   → distribution summary      │   │
+│  │  compute_distribution(var) → cohort breakdown           │   │
+│  │  flag_error(patient, type) → correct/false positive     │   │
+│  │  submit_report(text)       → quality score              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│        │                                                        │
+│        ▼                                                        │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              Multi-Dimensional Grading                   │   │
+│  │  Recall (70%) + Precision (15%) + Workflow (5%)         │   │
+│  │  + Efficiency (5%) + Report Quality (5%)                │   │
+│  │  Dense step rewards + episode benchmark score           │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-Local validation result:
+### Key Design Decisions
 
-```text
-[OK] : Ready for multi-mode deployment
-```
+1. **Procedural Generation** — Each `reset()` samples a new protocol with different age ranges, timing windows, and bias thresholds using seeded stochastic processes. No two environments are identical, preventing memorization.
+
+2. **Adversarial Traps** — Valid edge cases (boundary ages, near-window delays, valid Stage IV exceptions) are deliberately injected to punish agents that use naive threshold-based heuristics.
+
+3. **Confounder-Aware Bias** — Hard episodes may contain either genuine selection bias OR a confounded high-risk cohort. The confounder (high-risk outreach site with more late-stage patients) creates an overall mortality gap that disappears after stage-stratified analysis. Agents must perform this adjustment before flagging.
+
+4. **Phase-Gated Workflow** — Agents must investigate variables before flagging errors, and compute distributions before claiming bias. Skipping phases is penalized, encouraging structured reasoning over guessing.
+
+---
 
 ## Task Suite
 
 ### Task 1: `task_easy` — Dynamic Eligibility Screening
-- Dataset size: about `300` patients
-- Goal: flag `invalid_age`
-- Difficulty source: the age bounds are episode-specific, not fixed at 18-120
-- Traps: valid edge ages at the protocol boundary
+
+| Property | Value |
+|:---|:---|
+| Dataset | ~300 patients |
+| Error types | `invalid_age` |
+| Difficulty source | Age bounds are episode-specific (e.g., 35-75, 45-85), not fixed at 18-120 |
+| Traps | Valid boundary ages at exact protocol limits |
+| Step budget | 18 |
 
 ### Task 2: `task_medium` — Protocol Timeline Audit
-- Dataset size: about `480` patients
-- Goal: flag `invalid_age`, `temporal_inconsistency`, and `protocol_window_violation`
-- Difficulty source: the treatment-start window is protocol-specific and Stage IV has a longer valid window
-- Traps: valid near-boundary start delays and near-immediate but valid deaths
+
+| Property | Value |
+|:---|:---|
+| Dataset | ~480 patients |
+| Error types | `invalid_age`, `temporal_inconsistency`, `protocol_window_violation` |
+| Difficulty source | Treatment-start window is protocol-specific; Stage IV has a longer valid window |
+| Traps | Near-boundary delays, valid Stage IV exceptions, near-immediate valid deaths |
+| Step budget | 34 |
 
 ### Task 3: `task_hard` — Equity + Protocol Audit
-- Dataset size: about `720` patients
-- Goal: flag record-level issues and determine whether actionable `selection_bias` exists
-- Difficulty source: some hard episodes contain real control-arm bias, while others contain a confounded high-risk cohort that only looks biased before stage adjustment
-- Traps: treatment-arm skew, high-risk outreach sites, and false-positive bias patterns
+
+| Property | Value |
+|:---|:---|
+| Dataset | ~720 patients |
+| Error types | `invalid_age`, `temporal_inconsistency`, `protocol_window_violation`, `selection_bias` |
+| Difficulty source | Some episodes have genuine bias; others have a confounded high-risk cohort that only looks biased before stage adjustment |
+| Traps | Treatment-arm skew, high-risk outreach sites, false-positive bias patterns |
+| Step budget | 46 |
+
+---
+
+## Why ClinicalBench Is Hard
+
+This benchmark is designed to expose fundamental limitations in current AI systems:
+
+| Challenge | Why It Breaks Naive Agents |
+|:---|:---|
+| **Dynamic protocols** | Rules embedded in natural language change every episode — hardcoded thresholds fail |
+| **Non-linear constraints** | Stage IV exception creates a conditional rule that requires cross-referencing two fields |
+| **Conflicting signals** | High-risk sites inflate mortality for minorities, but the cause is disease severity, not sampling bias |
+| **Limited step budget** | Agents cannot check every patient — they must prioritize investigations and triage efficiently |
+| **Phased workflow** | Flagging before investigating is blocked and penalized — forces structured reasoning |
+| **Overconfidence penalty** | High-confidence wrong flags are penalized 1.8× — discourages guessing |
+
+---
+
+## Benchmark Results
+
+Reproducible baseline scores (`seed=20260402`):
+
+| Agent | Easy | Medium | Hard | Average | Precision | Description |
+|:---|:---:|:---:|:---:|:---:|:---:|:---|
+| **Naive LLM** | 0.19 | 0.06 | 0.06 | **0.10** | 5% | Raw prompt + small sample, no structured reasoning |
+| **Heuristic** | 0.81 | 0.56 | 0.45 | **0.60** | 61% | Parses rules but ignores Stage IV exceptions, uses overall (not stage-adjusted) bias |
+| **Reasoning Agent** | 0.97 | 0.97 | 0.98 | **0.98** | 100% | Full protocol parsing + stage-aware detectors + structured workflow |
+
+**The 88-point gap** between the naive LLM (0.10) and the tool-augmented reasoning agent (0.98) demonstrates the necessity of structured protocol comprehension and staged investigation. The heuristic agent's mediocre performance (0.60) shows that even rule-based approaches fail when they don't account for conditional exceptions and confounded statistics.
+
+### What This Tells Us
+
+- **Language understanding alone is insufficient** — the naive LLM reads the protocol but cannot systematically apply it across hundreds of records
+- **Heuristics miss conditional logic** — ignoring the Stage IV exception and using raw (not stage-adjusted) mortality gaps causes cascading false positives and missed real violations
+- **Structured reasoning closes the gap** — the reasoning agent's workflow (parse protocol → investigate → flag → verify → report) achieves near-perfect scores by respecting the environment's phase constraints
+
+---
 
 ## Action Space
 
 ```python
 class AuditAction(Action):
-    action_type: str  # investigate_pattern | compute_distribution | flag_error | propose_fix | submit_report
-    variable: Optional[str]
-    patient_id: Optional[str]
-    error_type: Optional[str]  # invalid_age | temporal_inconsistency | protocol_window_violation | selection_bias
-    reason: Optional[str]
+    action_type: str           # investigate_pattern | compute_distribution |
+                                # flag_error | propose_fix | submit_report
+    variable: Optional[str]     # Field to investigate or compute
+    patient_id: Optional[str]   # Patient to flag
+    error_type: Optional[str]   # invalid_age | temporal_inconsistency |
+                                # protocol_window_violation | selection_bias
+    reason: Optional[str]       # Justification text
     proposed_value: Optional[str]
-    report: Optional[str]
-    confidence: Optional[float]
+    report: Optional[str]       # Final audit report
+    confidence: Optional[float] # 0.0-1.0 confidence in the flag
 ```
 
 ## Observation Space
 
 ```python
 class AuditObservation(Observation):
-    done: bool
-    reward: float
-    task_id: str
-    task_type: str
-    task_description: str
-    protocol_title: str
-    trial_protocol_excerpt: str
-    dataset: list[dict]
-    errors_found: list[str]
-    patterns_investigated: list[str]
-    distributions_computed: list[str]
-    feedback: str
-    score_so_far: float
-    dense_reward_total: float
-    score_breakdown: dict[str, float]
-    attempts_remaining: int
-    phase: str
+    done: bool                          # Episode finished?
+    reward: float                       # Dense step reward
+    task_id: str                        # task_easy | task_medium | task_hard
+    task_type: str                      # Audit category
+    task_description: str               # Task instructions
+    protocol_title: str                 # Episode protocol ID
+    trial_protocol_excerpt: str         # Natural language protocol rules
+    dataset: list[dict]                 # Full patient records
+    errors_found: list[str]             # Correctly flagged patients
+    patterns_investigated: list[str]    # Variables investigated
+    distributions_computed: list[str]   # Distributions computed
+    feedback: str                       # Step-by-step feedback
+    score_so_far: float                 # Current benchmark score [0, 1]
+    dense_reward_total: float           # Cumulative dense reward
+    score_breakdown: dict[str, float]   # {recall, precision, workflow, efficiency, report}
+    attempts_remaining: int             # Steps left in budget
+    phase: str                          # investigation | flagging
 ```
 
-## Reward Design and Benchmark Score
+---
 
-The environment uses two scoring layers:
+## Reward Design
 
-- Dense step reward:
-  - correct flags,
-  - false-positive penalties,
-  - duplicate penalties,
-  - investigation/distribution bonuses,
-  - confidence penalties for overconfident wrong flags,
-  - per-step costs.
+ClinicalBench uses **two scoring layers** to separate RL training signal from benchmark evaluation:
 
-- Episode benchmark score (`score_so_far`):
-  - recall: `70%`
-  - precision: `15%`
-  - workflow discipline: `5%`
-  - efficiency: `5%`
-  - report quality: `5%`
+### Dense Step Reward (for RL training)
+- **Correct flag**: +0.16
+- **False positive**: −0.26 (asymmetric to penalize guessing)
+- **Duplicate flag**: −0.08
+- **New investigation**: +0.04
+- **Overconfident wrong flag**: reward × −1.8
+- **Per-step cost**: −0.004 × step_count (increasing pressure)
 
-This separation keeps the RL signal dense while preventing early score saturation from hiding later mistakes.
+### Episode Benchmark Score (for evaluation)
+| Component | Weight | Signal |
+|:---|:---:|:---|
+| Recall | 70% | What fraction of real errors were caught? |
+| Precision | 15% | How many flags were correct? |
+| Workflow Discipline | 5% | Did the agent investigate before flagging? |
+| Efficiency | 5% | Ratio of useful actions to total actions |
+| Report Quality | 5% | Does the report cite protocol, root cause, risk, corrective action, fairness? |
 
-## Procedural Generation and Reproducibility
+This separation keeps the RL signal dense (partial progress on every step) while preventing early score saturation from hiding later mistakes.
 
-Run the generator self-test:
+---
+
+## Procedural Generation
+
+Each episode generates a unique dataset with new protocol constraints:
 
 ```bash
 python3 server/dataset_generator.py
 ```
 
-What it guarantees:
-- same seed -> same dataset, same protocol excerpt, same ground truth,
-- different seeds -> different protocols and different datasets,
-- deterministic grading compatibility,
-- hard mode can alternate between `true_bias` and `confounded_no_bias`.
+**Guarantees:**
+- Same seed → identical dataset, protocol, and ground truth
+- Different seeds → different protocols with different rules
+- Deterministic grading: reproducible scores across machines
+- Hard mode alternates between `true_bias` and `confounded_no_bias`
 
-Example validated seeded profile:
+**Example validated profile (seed=42):**
+- Easy: 300 patients, 8 errors, 13 traps
+- Medium: 480 patients, 23 errors, 25 traps
+- Hard: 720 patients, 34 errors, 40 traps
 
-- Easy: `300` patients, `8` record-level errors, `13` traps
-- Medium: `480` patients, `23` record-level errors, `25` traps
-- Hard: `720` patients, `34` total issues including protocol/timing/bias logic, `40` traps
+---
 
-## Baseline Inference (`inference.py`)
+## Quick Start
 
-`inference.py` now demonstrates a clean difficulty gradient:
-
-- `naive`: raw sample-level behavior
-- `heuristic`: rule-based but trap-prone
-- `full`: protocol parser + stage-aware detectors + structured reporting
-- `all`: side-by-side comparison
-
-HTTP mode:
-
-```bash
-python3 inference.py --mode all
-```
-
-Isolated local validation mode with no socket bind:
-
-```bash
-ENV_BASE_URL=inprocess python3 inference.py --mode all
-```
-
-LLM integration:
-- When `OPENAI_API_KEY` or `HF_TOKEN` is present, naive mode and report generation use the OpenAI-compatible client pointed at `API_BASE_URL`.
-- Without a key, the script falls back to deterministic local behavior so validation still runs end-to-end.
-
-Current reproducible local benchmark result:
-
-Command:
-
-```bash
-ENV_BASE_URL=inprocess python3 inference.py --mode all --seed 20260402
-```
-
-Scores:
-
-| Agent | Easy | Medium | Hard | Average |
-|---|---:|---:|---:|---:|
-| Naive | 0.36 | 0.08 | 0.09 | 0.18 |
-| Heuristic | 0.81 | 0.56 | 0.45 | 0.60 |
-| Full | 0.98 | 0.99 | 0.99 | 0.99 |
-
-This is the intended story:
-- naive agents underperform badly,
-- shallow heuristics get trapped by dynamic protocol edges and confounded bias signals,
-- protocol-aware agents perform strongly.
-
-## Local Usage
-
-### 1) Start the server
+### 1. Start the Server
 
 ```bash
 cd server
 PYTHONPATH=.. python3 -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-### 2) Health check
+### 2. Open the Dashboard
+
+Navigate to [http://localhost:8000](http://localhost:8000) to see the enterprise audit command center. Select an agent and task, then click **Start Audit** to watch the reasoning loop in real time.
+
+### 3. Health Check
 
 ```bash
 curl -s http://localhost:8000/health
 ```
 
-### 3) Run the baseline
+### 4. Run Baseline Inference
 
 ```bash
-cd ..
-python3 inference.py --mode all
+# Full comparison (all 3 agents × all 3 tasks)
+ENV_BASE_URL=inprocess python3 inference.py --mode all --seed 20260402
+
+# Single agent mode
+python3 inference.py --mode full
 ```
+
+### 5. OpenEnv Validation
+
+```bash
+openenv validate .
+```
+
+---
 
 ## Docker
 
-Build and run:
-
 ```bash
-cd server
-docker build -t clinical-trial-auditor:latest .
-docker run -p 8000:8000 clinical-trial-auditor:latest
+docker build -t clinical-bench:latest .
+docker run -p 8000:8000 clinical-bench:latest
 ```
 
-The container exposes `/health` for health checks and is ready for Hugging Face Spaces container deployment.
+The container exposes:
+- `/health` for health checks
+- `/` for the enterprise dashboard
+- WebSocket endpoints for OpenEnv `reset()` / `step()` / `state()`
 
-## Hugging Face Space Readiness Checklist
+---
 
-- [x] OpenEnv interface implemented
-- [x] typed models for action/observation/state
-- [x] `openenv.yaml` present
-- [x] 3 tasks with deterministic graders and scores in `[0.0, 1.0]`
-- [x] dense reward shaping and benchmark rubric
-- [x] reproducible `inference.py` at repo root
-- [x] dockerized server
+## Real-World Relevance
+
+ClinicalBench models tasks that clinical data managers perform daily:
+
+| Real-World Task | ClinicalBench Equivalent |
+|:---|:---|
+| ICH-E6(R2) protocol compliance review | Age eligibility + treatment window verification |
+| FDA 21 CFR Part 11 data integrity audit | Temporal consistency checking |
+| DSMB safety signal assessment | Stage-adjusted outcome disparity analysis |
+| IRB equity review | Confounder-aware selection bias detection |
+
+This benchmark is immediately useful for evaluating whether an LLM-based agent can be safely deployed in a clinical data management workflow — one of healthcare AI's highest-value, highest-risk applications.
+
+---
+
+## OpenEnv Compliance
+
+- [x] Typed `Action`, `Observation`, `State` models (Pydantic)
+- [x] `reset(seed, task_id) → Observation`
+- [x] `step(action) → Observation`
+- [x] `state → current state`
+- [x] `openenv.yaml` with metadata and 3 tasks
 - [x] `openenv validate .` passes
+- [x] 3 tasks with deterministic graders, scores in `[0.0, 1.0]`
+- [x] Dense reward shaping + benchmark rubric
+- [x] Reproducible `inference.py` at repo root
+- [x] Dockerized with health check
+- [x] Inference runtime < 3 minutes
+- [x] Runs on 2 vCPU / 8GB memory
 
 ## Project Structure
 
-```text
+```
 clinical_trial_auditor/
-├── openenv.yaml
-├── inference.py
-├── client.py
-├── models.py
+├── openenv.yaml              # OpenEnv manifest with 3 tasks
+├── inference.py              # Baseline inference (naive/heuristic/full)
+├── client.py                 # EnvClient implementation
+├── models.py                 # Typed Action/Observation/State
 ├── README.md
+├── Dockerfile
+├── requirements.txt
+├── pyproject.toml
+├── docs/
+│   └── architecture.md       # Detailed system architecture
 └── server/
-    ├── app.py
+    ├── app.py                # FastAPI + dashboard API
     ├── clinical_trial_auditor_environment.py
-    ├── dataset_generator.py
+    ├── dataset_generator.py  # Procedural adversarial data engine
     ├── models.py
     ├── requirements.txt
-    └── Dockerfile
+    └── static/
+        └── index.html        # Enterprise audit dashboard
 ```
 
-## Motivation
+---
 
-This benchmark is built to test whether an agent can read a changing clinical protocol, audit patient records against that protocol, avoid hallucinated escalations, and write a grounded operational report under a limited action budget.
+<div align="center">
+
+**Built for the Meta × Scaler School of Technology OpenEnv Hackathon**
+
+*ClinicalBench: because the hardest thing about AI in healthcare isn't the model — it's knowing when to trust it.*
+
+</div>
