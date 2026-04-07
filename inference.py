@@ -45,8 +45,8 @@ except ImportError:
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/hf-inference/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3.1-70B-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3.3-70B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
 BASELINE_SEED = int(os.getenv("BASELINE_SEED", "20260402"))
 
@@ -151,8 +151,31 @@ class MetricsTracker:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Environment Session Abstraction
+# Environment Session Abstraction (with START/STEP/END wrapper)
 # ═══════════════════════════════════════════════════════════════
+
+class EnvLoggerWrapper:
+    def __init__(self, env):
+        self.env = env
+
+    def __enter__(self):
+        if hasattr(self.env, "__enter__"):
+            self.env.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        print("END")
+        if hasattr(self.env, "__exit__"):
+            return self.env.__exit__(exc_type, exc, tb)
+        return False
+
+    def reset(self, **kwargs):
+        print("START")
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        print("STEP")
+        return self.env.step(action)
 
 class InProcessEnvSession:
     def __init__(self):
@@ -174,11 +197,10 @@ class InProcessEnvSession:
         observation = self._env.step(action)
         return SimpleNamespace(observation=observation, reward=observation.reward, done=observation.done)
 
-
 def open_env_session():
     if ENV_BASE_URL.lower() == "inprocess":
-        return InProcessEnvSession()
-    return ClinicalTrialAuditorEnv(base_url=ENV_BASE_URL).sync()
+        return EnvLoggerWrapper(InProcessEnvSession())
+    return EnvLoggerWrapper(ClinicalTrialAuditorEnv(base_url=ENV_BASE_URL).sync())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -779,7 +801,7 @@ def main():
     parser.add_argument("--seed", type=int, default=BASELINE_SEED)
     args = parser.parse_args()
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if API_KEY else None
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN) if HF_TOKEN else None
 
     print("=" * 70)
     print("  ClinicalBench — Agentic Reasoning Baseline Inference")
