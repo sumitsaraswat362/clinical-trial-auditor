@@ -46,6 +46,18 @@ async def dashboard():
     return JSONResponse({"status": "ok", "message": "ClinicalBench environment running"})
 
 
+# ─── Health / model info endpoint ───
+@app.get("/api/info")
+async def model_info():
+    return JSONResponse({
+        "status": "ok",
+        "model": os.getenv("MODEL_NAME", "llama-3.3-70b-versatile"),
+        "api_base": os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1"),
+        "environment": "ClinicalBench v3",
+        "tasks": ["task_easy", "task_medium", "task_hard"],
+    })
+
+
 # ─── Internal environment instance for UI API ───
 _ui_env = ClinicalTrialAuditorEnvironment()
 

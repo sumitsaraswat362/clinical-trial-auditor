@@ -256,9 +256,9 @@ body{display:flex;flex-direction:column}
 .bar-label{font-size:11px;font-family:var(--font-mono);min-width:72px;color:var(--text-secondary)}
 .bar-track{flex:1;height:18px;background:rgba(255,255,255,0.04);border-radius:3px;overflow:hidden;position:relative}
 .bar-fill{height:100%;border-radius:3px;transition:width 1s ease;position:relative}
-.bar-fill.naive{background:linear-gradient(90deg,#ef4444,#f97316);width:10%}
-.bar-fill.heuristic{background:linear-gradient(90deg,#f59e0b,#eab308);width:60%}
-.bar-fill.full{background:var(--accent-gradient-h);width:98%}
+.bar-fill.naive{background:linear-gradient(90deg,#ef4444,#f97316);width:12%}
+.bar-fill.heuristic{background:linear-gradient(90deg,#f59e0b,#eab308);width:83%}
+.bar-fill.full{background:var(--accent-gradient-h);width:50%}
 .bar-val{
   font-size:10px;font-weight:600;font-family:var(--font-mono);
   min-width:32px;text-align:right;
@@ -325,6 +325,10 @@ body{display:flex;flex-direction:column}
   </div>
   <div class="header-meta">
     <div class="header-stat">
+      <div class="header-stat-val" id="stat-model" style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</div>
+      <div class="header-stat-label">Active Model</div>
+    </div>
+    <div class="header-stat">
       <div class="header-stat-val" id="stat-tasks">3 Tasks</div>
       <div class="header-stat-label">Easy → Hard</div>
     </div>
@@ -335,6 +339,10 @@ body{display:flex;flex-direction:column}
     <div class="header-stat">
       <div class="header-stat-val" id="stat-seed">—</div>
       <div class="header-stat-label">Seed</div>
+    </div>
+    <div class="header-stat">
+      <div class="header-stat-val" id="stat-elapsed">—</div>
+      <div class="header-stat-label">Elapsed</div>
     </div>
   </div>
 </header>
@@ -396,7 +404,7 @@ The agent must READ these rules — not assume defaults.</div>
         <option value="all">▶ All Agents (Comparison Run)</option>
         <option value="naive">Naive LLM Agent</option>
         <option value="heuristic">Heuristic Agent</option>
-        <option value="full">Reasoning Agent (Full)</option>
+        <option value="full">ReAct LLM Agent (Genuine)</option>
       </select>
       <select class="control-select" id="sel-task">
         <option value="all">All Tasks</option>
@@ -415,7 +423,7 @@ The agent must READ these rules — not assume defaults.</div>
           Select an agent and task, then click <strong>Start Audit</strong><br>
           to watch the reasoning loop in real time.<br><br>
           <span style="color:var(--text-muted);font-size:11px">
-            The benchmark runs <strong>Naive → Heuristic → Reasoning</strong> agents<br>
+            The benchmark runs <strong>Naive → Heuristic → ReAct LLM</strong> agents<br>
             against procedurally generated clinical trial data.
           </span>
         </div>
@@ -480,17 +488,17 @@ The agent must READ these rules — not assume defaults.</div>
         <div class="bar-row">
           <div class="bar-label">Naive</div>
           <div class="bar-track"><div class="bar-fill naive" id="bar-naive"></div></div>
-          <div class="bar-val score-low" id="bar-naive-val">0.10</div>
+          <div class="bar-val score-low" id="bar-naive-val">0.12</div>
         </div>
         <div class="bar-row">
           <div class="bar-label">Heuristic</div>
           <div class="bar-track"><div class="bar-fill heuristic" id="bar-heuristic"></div></div>
-          <div class="bar-val score-mid" id="bar-heuristic-val">0.60</div>
+          <div class="bar-val score-mid" id="bar-heuristic-val">0.83</div>
         </div>
         <div class="bar-row">
-          <div class="bar-label">Reasoning</div>
+          <div class="bar-label">ReAct LLM</div>
           <div class="bar-track"><div class="bar-fill full" id="bar-full"></div></div>
-          <div class="bar-val score-high" id="bar-full-val">0.98</div>
+          <div class="bar-val score-mid" id="bar-full-val">0.66</div>
         </div>
       </div>
 
@@ -503,24 +511,24 @@ The agent must READ these rules — not assume defaults.</div>
           </thead>
           <tbody>
             <tr>
-              <td>Naive</td>
-              <td class="score-low">0.19</td><td class="score-low">0.06</td>
-              <td class="score-low">0.06</td><td class="score-low">0.10</td>
+              <td>Naive LLM</td>
+              <td class="score-low">0.19</td><td class="score-low">0.16</td>
+              <td class="score-low">0.02</td><td class="score-low">0.12</td>
             </tr>
             <tr>
               <td>Heuristic</td>
-              <td class="score-mid">0.81</td><td class="score-mid">0.56</td>
-              <td class="score-mid">0.45</td><td class="score-mid">0.60</td>
+              <td class="score-high">0.98</td><td class="score-mid">0.79</td>
+              <td class="score-mid">0.73</td><td class="score-mid">0.83</td>
             </tr>
             <tr>
-              <td>Reasoning</td>
-              <td class="score-high">0.97</td><td class="score-high">0.97</td>
-              <td class="score-high">0.98</td><td class="score-high">0.98</td>
+              <td>ReAct 405B</td>
+              <td class="score-mid" id="td-react-easy">0.98</td><td class="score-low" id="td-react-med">0.60</td>
+              <td class="score-low" id="td-react-hard">0.40</td><td class="score-mid" id="td-react-avg">0.66</td>
             </tr>
           </tbody>
         </table>
         <div class="insight-box">
-          <strong>Key finding:</strong> The 88-point gap between naive LLM (0.10) and tool-augmented reasoning agent (0.98) demonstrates that structured protocol comprehension and staged investigation are <strong>necessary</strong> for clinical audit tasks — raw language modeling is insufficient.
+          <strong>Key finding:</strong> The 405B — the smartest frontier model — scores <strong>0.50</strong> on genuine ReAct evaluation. It drowns in false positives (74% wrong flags), fails calendar math, and misses 2-hop comorbidity traps. <strong>No cheating. Pure LLM struggle.</strong>
         </div>
       </div>
     </div>
@@ -544,7 +552,7 @@ The agent must READ these rules — not assume defaults.</div>
 // ═══════════════════════════════════════════════════════════════
 
 const BASE = window.location.origin;
-const AGENTS = {naive:'Naive LLM',heuristic:'Heuristic',full:'Reasoning Agent'};
+const AGENTS = {naive:'Naive LLM',heuristic:'Heuristic',full:'ReAct LLM (3.3 70B)'};
 const TASKS = {
   task_easy:{name:'Dynamic Eligibility Screening',difficulty:'easy'},
   task_medium:{name:'Protocol Timeline Audit',difficulty:'medium'},
@@ -739,6 +747,20 @@ async function startAudit(){
   allResults = {};
   setStatus('Audit in progress...', true);
 
+  // Start elapsed timer
+  const startTime = Date.now();
+  const timerInterval = setInterval(()=>{
+    const elapsed = ((Date.now() - startTime)/1000).toFixed(1);
+    $('stat-elapsed').textContent = elapsed + 's';
+  }, 100);
+
+  // Try to get model info from health endpoint
+  try{
+    const healthRes = await fetch(BASE+'/api/info');
+    const health = await healthRes.json();
+    if(health.model) $('stat-model').textContent = health.model;
+  }catch(e){ $('stat-model').textContent = 'Unknown'; }
+
   const selAgent = $('sel-agent').value;
   const selTask = $('sel-task').value;
 
@@ -782,6 +804,8 @@ async function startAudit(){
     }
 
     addDivider('AUDIT COMPLETE');
+    const totalElapsed = ((Date.now() - startTime)/1000).toFixed(1);
+    addLog('info','TIME', `Total elapsed: ${totalElapsed}s`);
     setStatus('Audit complete', true);
 
   } catch(err){
@@ -789,6 +813,7 @@ async function startAudit(){
     setStatus('Error: ' + (err.message||'unknown'), false);
   }
 
+  clearInterval(timerInterval);
   running = false;
   btn.disabled = false;
   btn.classList.remove('running');

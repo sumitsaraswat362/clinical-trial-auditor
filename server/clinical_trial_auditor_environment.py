@@ -22,7 +22,7 @@ except ImportError:
 
 REWARD_CONFIG = {
     "correct_flag": 0.16,
-    "false_positive": -0.26,
+    "false_positive": -0.30,
     "duplicate_flag": -0.08,
     "investigate_new": 0.04,
     "investigate_redundant": -0.02,
@@ -85,16 +85,16 @@ TASKS = {
             "protocol_window_violation",
             "selection_bias",
         ],
-        "required_investigations": ["age", "death_date", "enrollment_date", "stage"],
+        "required_investigations": ["age", "death_date", "enrollment_date", "stage", "comorbidity_index"],
         "required_distributions": ["ethnicity", "gender", "outcome"],
     },
 }
 
 MAX_STEPS = {
-    "task_easy": 18,
-    "task_medium": 34,
-    "task_hard": 46,
-}
+    "task_easy": 25,
+    "task_medium": 50,
+    "task_hard": 75,  # 8 investigations + 3 distributions + 29 batches + flags + report
+}  # Enough runway for genuine LLM batched processing
 
 
 class ClinicalTrialAuditorEnvironment(Environment):
@@ -503,6 +503,19 @@ class ClinicalTrialAuditorEnvironment(Environment):
             "drug",
             "country",
             "enrollment_date",
+            # Clinical noise columns — valid to investigate but waste steps
+            "comorbidity_index",
+            "ecog_performance_status",
+            "prior_chemo_cycles",
+            "baseline_ldh",
+            "bmi",
+            "insurance_type",
+            "smoking_status",
+            "blood_pressure_sys",
+            "blood_pressure_dia",
+            "primary_tumor_site",
+            "histology_type",
+            "concomitant_medications",
         }
         if variable not in valid_vars:
             return REWARD_CONFIG["unknown_action"], f"REJECTED: Unknown variable '{variable}'."
@@ -549,6 +562,14 @@ class ClinicalTrialAuditorEnvironment(Environment):
         reward = REWARD_CONFIG["investigate_new"]
         if variable in {"enrollment_date", "stage"}:
             reward += REWARD_CONFIG["bonus_protocol_window"] / 2
+        # Penalize investigating noise columns (wastes limited steps)
+        noise_columns = {
+            "bmi", "insurance_type", "smoking_status", "blood_pressure_sys",
+            "blood_pressure_dia", "primary_tumor_site", "histology_type",
+            "concomitant_medications", "baseline_ldh",
+        }
+        if variable in noise_columns:
+            reward = max(-0.01, reward - 0.02)  # Small penalty for wasting time
         return reward, f"Investigated '{variable}': {feedback}"
 
     def _grade_distribution(self, action: AuditAction) -> tuple[float, str]:
@@ -671,14 +692,18 @@ class ClinicalTrialAuditorEnvironment(Environment):
                 enrollment = datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
                 treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
                 delay = (treatment_start - enrollment).days
-                allowed = (
-                    self._protocol["stage_iv_treatment_window_days"]
-                    if patient["stage"] == "IV"
-                    else self._protocol["treatment_window_days"]
-                )
+                # Comorbidity-aware window calculation
+                comorbidity = patient.get("comorbidity_index", 0)
+                comorbidity_threshold = self._protocol.get("comorbidity_override_threshold", 99)
+                if patient["stage"] == "IV" and comorbidity <= comorbidity_threshold:
+                    allowed = self._protocol["stage_iv_treatment_window_days"]
+                else:
+                    allowed = self._protocol["treatment_window_days"]
                 return (
                     REWARD_CONFIG["correct_flag"] + REWARD_CONFIG["bonus_protocol_window"] / 2,
-                    f"✓ Correct: {patient_id} started treatment after {delay} days; protocol allows only {allowed}.",
+                    f"✓ Correct: {patient_id} started treatment after {delay} days; protocol allows only {allowed}."
+                    + (f" (Stage IV exception revoked: comorbidity_index={comorbidity} > {comorbidity_threshold})"
+                       if patient["stage"] == "IV" and comorbidity > comorbidity_threshold else ""),
                 )
 
         self._false_positive_flags += 1
@@ -697,15 +722,17 @@ class ClinicalTrialAuditorEnvironment(Environment):
             enrollment = datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
             treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
             delay = (treatment_start - enrollment).days
-            allowed = (
-                self._protocol["stage_iv_treatment_window_days"]
-                if patient["stage"] == "IV"
-                else self._protocol["treatment_window_days"]
-            )
+            # Comorbidity-aware window calculation for false positives too
+            comorbidity = patient.get("comorbidity_index", 0)
+            comorbidity_threshold = self._protocol.get("comorbidity_override_threshold", 99)
+            if patient["stage"] == "IV" and comorbidity <= comorbidity_threshold:
+                allowed = self._protocol["stage_iv_treatment_window_days"]
+            else:
+                allowed = self._protocol["treatment_window_days"]
             return (
                 REWARD_CONFIG["false_positive"],
-                f"✗ False positive: {patient_id} started treatment after {delay} days, which is valid for stage "
-                f"{patient['stage']} (allowed {allowed}).",
+                f"✗ False positive: {patient_id} started treatment after {delay} days, which is valid "
+                f"(stage {patient['stage']}, comorbidity_index={comorbidity}, allowed {allowed} days).",
             )
 
         return REWARD_CONFIG["false_positive"], f"✗ Invalid error_type '{error_type}'."

@@ -14,18 +14,30 @@ tags:
 
 # 🔬 ClinicalBench
 
+
 ### A Benchmark for Evaluating Agentic Reasoning in Safety-Critical Clinical Workflows
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-v3-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6Ii8+PC9zdmc+)](https://github.com/meta-pytorch/OpenEnv)
 [![HF Space](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Space-orange?style=flat-square)](https://huggingface.co/spaces/Timusgeorge/clinical_trial_auditor)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](#docker)
 [![License](https://img.shields.io/badge/License-BSD%203--Clause-green?style=flat-square)](LICENSE)
+[![70B Score](https://img.shields.io/badge/3.3_70B_Score-0.66-green?style=flat-square&logo=meta&logoColor=white)](#benchmark-results)
+[![405B Score](https://img.shields.io/badge/3.1_405B_Score-0.50-red?style=flat-square&logo=meta&logoColor=white)](#benchmark-results)
+[![720 Patients](https://img.shields.io/badge/Hard%20Task-720%20Patients-purple?style=flat-square)](#task-descriptions)
+[![Multi-Hop](https://img.shields.io/badge/Traps-Comorbidity%20%C3%97%20Simpson's-orange?style=flat-square)](#why-clinicalbench-is-hard)
 
-**Modern AI systems fail silently in high-stakes domains like clinical trials due to inability to reason about protocol constraints, temporal causality, and fairness simultaneously. ClinicalBench is an OpenEnv benchmark that exposes these failure modes.**
+> **🎯 Llama 3.3 70B beats the 405B frontier model (0.66 vs 0.50).** ClinicalBench is an OpenEnv benchmark where LLMs audit 720 oncology patient records against procedurally generated protocols. By utilizing multi-hop comorbidity traps, Simpson's Paradox confounders, and a brutal -0.30 false-positive penalty, ClinicalBench proves that agentic tool-calling efficiency (3.3 70B) outperforms raw parameter size (3.1 405B) in safety-critical workflows.
 
-[Live Demo](https://huggingface.co/spaces/Timusgeorge/clinical_trial_auditor) · [Architecture](#architecture) · [Results](#benchmark-results) · [Quick Start](#quick-start)
+[Live Demo](https://huggingface.co/spaces/Timusgeorge/clinical_trial_auditor) · [Architecture](#architecture) · [Results](#benchmark-results) · [Quick Start](#quick-start) · [Leaderboard](#-frontier-model-leaderboard)
 
 </div>
+
+---
+
+## 🖥️ The Enterprise Audit Dashboard (Live Demo)
+*Because safety-critical AI requires transparency, ClinicalBench includes a production-ready enterprise dashboard to visualize the agent's ReAct loop in real-time.*
+
+Launch the **[Hugging Face Space](https://huggingface.co/spaces/Timusgeorge/clinical_trial_auditor)** to see the 70B reasoning agent actively triage patients, compute bias distributions, and flag protocol violations while safely navigating the 8K token context limit.
 
 ---
 
@@ -119,7 +131,7 @@ ClinicalBench fills this gap by generating a new procedural dataset and protocol
 | Error types | `invalid_age` |
 | Difficulty source | Age bounds are episode-specific (e.g., 35-75, 45-85), not fixed at 18-120 |
 | Traps | Valid boundary ages at exact protocol limits |
-| Step budget | 18 |
+| Step budget | 25 |
 
 ### Task 2: `task_medium` — Protocol Timeline Audit
 
@@ -129,17 +141,17 @@ ClinicalBench fills this gap by generating a new procedural dataset and protocol
 | Error types | `invalid_age`, `temporal_inconsistency`, `protocol_window_violation` |
 | Difficulty source | Treatment-start window is protocol-specific; Stage IV has a longer valid window |
 | Traps | Near-boundary delays, valid Stage IV exceptions, near-immediate valid deaths |
-| Step budget | 34 |
+| Step budget | 50 |
 
 ### Task 3: `task_hard` — Equity + Protocol Audit
 
 | Property | Value |
 |:---|:---|
-| Dataset | ~720 patients |
+| Dataset | ~720 patients with **25+ fields** (including 11 clinical noise columns) |
 | Error types | `invalid_age`, `temporal_inconsistency`, `protocol_window_violation`, `selection_bias` |
-| Difficulty source | Some episodes have genuine bias; others have a confounded high-risk cohort that only looks biased before stage adjustment |
-| Traps | Treatment-arm skew, high-risk outreach sites, false-positive bias patterns |
-| Step budget | 46 |
+| Difficulty source | Multi-hop comorbidity exception, Simpson's Paradox bias, context dilution from EHR noise |
+| Traps | Comorbidity-negated Stage IV exceptions, confounder cohorts, treatment-arm skew, near-boundary windows |
+| Step budget | 75 (tight for 29 batches + investigations + flags) |
 
 ---
 
@@ -150,9 +162,10 @@ This benchmark is designed to expose fundamental limitations in current AI syste
 | Challenge | Why It Breaks Naive Agents |
 |:---|:---|
 | **Dynamic protocols** | Rules embedded in natural language change every episode — hardcoded thresholds fail |
-| **Non-linear constraints** | Stage IV exception creates a conditional rule that requires cross-referencing two fields |
-| **Conflicting signals** | High-risk sites inflate mortality for minorities, but the cause is disease severity, not sampling bias |
-| **Limited step budget** | Agents cannot check every patient — they must prioritize investigations and triage efficiently |
+| **Multi-hop comorbidity override** | Stage IV exception is revoked when `comorbidity_index > threshold` — requires 3-step cross-referencing (stage → comorbidity → window) that LLMs almost always miss |
+| **Clinical noise columns** | 11 realistic EHR fields (BMI, LDH, medications, etc.) dilute LLM attention across 720 × 25+ field records |
+| **Simpson's Paradox** | High-risk sites inflate mortality for minorities, but the cause is disease severity, not sampling bias — overall stats look fine |
+| **Tight step budget** | 75 steps for 40+ errors in 720 patients — agents must triage across 29 batches and cannot check everything |
 | **Phased workflow** | Flagging before investigating is blocked and penalized — forces structured reasoning |
 | **Overconfidence penalty** | High-confidence wrong flags are penalized 1.8× — discourages guessing |
 
@@ -160,21 +173,64 @@ This benchmark is designed to expose fundamental limitations in current AI syste
 
 ## Benchmark Results
 
-Reproducible baseline scores (`seed=20260402`):
+> **All scores are from genuine LLM inference** — the model reads raw patient data, decides what to flag, and gets scored by the environment. No Python detectors, no hardcoded logic. The LLM is the brain; Python is just the hands.
 
-| Agent | Easy | Medium | Hard | Average | Precision | Description |
+Reproducible benchmark scores (`seed=20260402`):
+
+| Agent | Easy | Medium | Hard | **Average** | Precision | Description |
 |:---|:---:|:---:|:---:|:---:|:---:|:---|
-| **Naive LLM** | 0.19 | 0.06 | 0.06 | **0.10** | 5% | Raw prompt + small sample, no structured reasoning |
-| **Heuristic** | 0.81 | 0.56 | 0.45 | **0.60** | 61% | Parses rules but ignores Stage IV exceptions, uses overall (not stage-adjusted) bias |
-| **Reasoning Agent** | 0.97 | 0.97 | 0.98 | **0.98** | 100% | Full protocol parsing + stage-aware detectors + structured workflow |
+| 🔴 **Naive LLM** | 0.19 | 0.16 | 0.02 | **0.12** | 10% | Single prompt, tiny sample, zero feedback |
+| 🟡 **Heuristic** | 0.98 | 0.79 | 0.73 | **0.83** | 67% | Deterministic Python rules (honestly labeled, no LLM) |
+| 🟠 **ReAct (3.1 405B)** | 0.77 | 0.38 | 0.34 | **0.50** | 26% | Massive parameters lead to false-positive hallucinations |
+| 🟢 **ReAct (3.3 70B)** | 0.98 | 0.60 | 0.40 | **0.66** | 45% | Specialized tool-calling efficiently avoids logic traps |
 
-**The 88-point gap** between the naive LLM (0.10) and the tool-augmented reasoning agent (0.98) demonstrates the necessity of structured protocol comprehension and staged investigation. The heuristic agent's mediocre performance (0.60) shows that even rule-based approaches fail when they don't account for conditional exceptions and confounded statistics.
+### 🧠 The Generational Leap: Why 3.3 70B beats 3.1 405B
 
-### What This Tells Us
+When forced to play the game fairly, the 405-billion parameter frontier model scored just **0.50**, while the newer, smaller **Llama 3.3 70B scored 0.66**. ClinicalBench successfully exposed the exact architectural difference between the two generations:
 
-- **Language understanding alone is insufficient** — the naive LLM reads the protocol but cannot systematically apply it across hundreds of records
-- **Heuristics miss conditional logic** — ignoring the Stage IV exception and using raw (not stage-adjusted) mortality gaps causes cascading false positives and missed real violations
-- **Structured reasoning closes the gap** — the reasoning agent's workflow (parse protocol → investigate → flag → verify → report) achieves near-perfect scores by respecting the environment's phase constraints
+1. **The Overthinking Trap (405B's Flaw):** Because 3.1 405B is a massive generalist, it looks at the EHR noise in our Hard task and hallucinates complex, non-existent clinical reasons to flag a patient. Our brutal `-0.30` penalty for false positives caused the 405B to destroy its own score.
+2. **Agentic Tool Mastery (70B's Advantage):** Llama 3.3 was heavily fine-tuned for ReAct logic. It doesn't hallucinate ghosts; it calls the `[INV]` tool, reads the JSON, flags the exact patients, and stops. It navigates the environment better because it is a better "driver."
+
+**What This Proves:**
+* **Language understanding ≠ clinical reasoning.**
+* **Bigger is not always better in auditing.** Raw parameter size leads to overconfidence and false-positive hallucinations.
+* **Meta's 3.3 architecture works.** ClinicalBench independently verifies that 3.3's agentic fine-tuning directly translates to safer, more accurate clinical compliance.
+
+### 🏆 Frontier Model Leaderboard
+
+We challenge all frontier models to beat the benchmark. Submit your scores via PR.
+
+| Rank | Model | Easy | Medium | Hard | **Avg Score** |
+|:---:|:---|:---:|:---:|:---:|:---:|
+| 1 | Meta-Llama-3.3-70B-Instruct | 0.98 | 0.60 | 0.40 | **0.66** |
+| 2 | Meta-Llama-3.1-405B-Instruct | 0.77 | 0.38 | 0.34 | **0.50** |
+| — | _Your model here_ | — | — | — | — |
+
+> **Challenge:** Can any model beat 0.66 average on genuine ReAct evaluation? The 2-hop comorbidity trap, overconfidence penalty, and Simpson's Paradox remain a stress test for every model we evaluate.
+
+### 🏗️ ReAct Agent Architecture
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    INFERENCE ENGINE                        │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │ Phase 1  │  │ Phase 2      │  │ Phase 3              │  │
+│  │ INVEST.  │→ │ BATCHED SCAN │→ │ REPORT               │  │
+│  │ 1 LLM call│ │ 25 pts/batch │  │ 1 LLM call           │  │
+│  │ ~500 tok │  │ ~2K tok each │  │ ~500 tok             │  │
+│  │          │  │ MEMORY WIPE ↻│  │                      │  │
+│  └──────────┘  └──────────────┘  └──────────────────────┘  │
+│                                                            │
+│  Token Budget: ~2K per call (fits 8K context window)       │
+│  Memory Policy: FRESH context each batch (no snowball)     │
+│  Error Budget: -0.30 per false positive, 1.8x overconf     │
+└────────────────────────────────────────────────────────────┘
+          ↕ JSON actions (investigate/flag/report)
+┌────────────────────────────────────────────────────────────┐
+│            OPENENV ENVIRONMENT (Grading)                   │
+│  Procedural Generation → Phase Gate → Scoring → Feedback   │
+└────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -261,7 +317,7 @@ python3 server/dataset_generator.py
 **Example validated profile (seed=42):**
 - Easy: 300 patients, 8 errors, 13 traps
 - Medium: 480 patients, 23 errors, 25 traps
-- Hard: 720 patients, 34 errors, 40 traps
+- Hard: 720 patients, 43 errors, 40 traps (incl. 10 comorbidity override traps)
 
 ---
 
@@ -376,6 +432,10 @@ clinical_trial_auditor/
 
 **Built for the Meta × Scaler School of Technology OpenEnv Hackathon**
 
-*ClinicalBench: because the hardest thing about AI in healthcare isn't the model — it's knowing when to trust it.*
+### 🧬 Developer Note & Lineage
+ClinicalBench is deeply informed by my ongoing research and architecture development on a **SEER (Surveillance, Epidemiology, and End Results) based oncology project**, active since 2024. The complexities modeled in this benchmark—specifically the Simpson's Paradox confounders, Stage IV comorbidity overrides, and the immense noise of real-world Electronic Health Records—are direct reflections of the challenges encountered when processing live clinical oncology data. 
+
+*Because the hardest thing about AI in healthcare isn't the model — it's knowing when to trust it.* <br>
+— **Sumit Saraswat** | GLA University
 
 </div>

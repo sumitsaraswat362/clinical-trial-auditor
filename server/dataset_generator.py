@@ -55,6 +55,16 @@ GENDERS = ["M", "F"]
 STAGES = ["I", "II", "III", "IV"]
 DRUGS_TREATMENT = ["ImmunoVax-7", "OncoShield-X", "TargetCure-3"]
 
+# ── Clinical noise columns (realistic EHR fields that dilute LLM attention) ──
+INSURANCE_TYPES = ["Private", "Medicare", "Medicaid", "Government", "Self-Pay", "Uninsured"]
+SMOKING_STATUS = ["Never", "Former", "Current", "Unknown"]
+PRIMARY_SITES = ["Breast", "Lung", "Colon", "Prostate", "Ovarian", "Pancreatic", "Liver"]
+HISTOLOGY_TYPES = ["Adenocarcinoma", "Squamous cell", "Large cell", "Small cell", "Ductal", "Lobular", "Other"]
+CONCOMITANT_DRUGS = [
+    "Metformin", "Aspirin", "Lisinopril", "Atorvastatin", "Omeprazole",
+    "Levothyroxine", "Amlodipine", "Gabapentin", "Metoprolol", "Ondansetron",
+]
+
 TRIAL_START = datetime(2022, 6, 1)
 TRIAL_END = datetime(2025, 3, 1)
 
@@ -122,6 +132,7 @@ DIFFICULTY_CONFIGS = {
         "bias_probability": 0.58,
         "control_ratio": 0.50,
         "task_type": "equity_and_protocol_audit",
+        "comorbidity_override_count": 10,  # Stage IV patients whose exception is negated by high comorbidity
     },
 }
 
@@ -153,6 +164,7 @@ class DatasetGenerator:
         age_min, age_max = self.rng.choice(AGE_RULESETS[difficulty])
         treatment_window = self.rng.choice(WINDOW_RULESETS[difficulty])
         stage_iv_window = treatment_window + self.rng.choice([7, 10, 14])
+        comorbidity_threshold = self.rng.choice([3, 4]) if difficulty == "hard" else 99
         high_risk_sites = self.rng.sample(sorted(RURAL_SITES), k=2 if difficulty == "hard" else 1)
         dominant_threshold = self.rng.choice([0.68, 0.70, 0.72]) if difficulty == "hard" else 0.0
         male_threshold = self.rng.choice([0.56, 0.60, 0.63]) if difficulty == "hard" else 0.0
@@ -178,9 +190,17 @@ class DatasetGenerator:
                 f"- Stage IV exception: treatment may begin within "
                 f"{stage_iv_window} days of enrollment."
             ),
+        ]
+        if difficulty == "hard":
+            lines.append(
+                f"- IMPORTANT: The Stage IV scheduling exception does NOT apply to patients "
+                f"with comorbidity_index > {comorbidity_threshold}. Such patients revert to the "
+                f"standard {treatment_window}-day window regardless of stage."
+            )
+        lines.extend([
             "- death_date must never precede treatment_start.",
             "- Do not assume a generic 18-120 range; this excerpt overrides defaults.",
-        ]
+        ])
 
         if difficulty == "hard":
             lines.extend(
@@ -211,6 +231,7 @@ class DatasetGenerator:
             "age_max": age_max,
             "treatment_window_days": treatment_window,
             "stage_iv_treatment_window_days": stage_iv_window,
+            "comorbidity_override_threshold": comorbidity_threshold,
             "high_risk_sites": high_risk_sites,
             "bias_control_dominance_threshold": dominant_threshold,
             "bias_male_threshold": male_threshold,
@@ -251,6 +272,11 @@ class DatasetGenerator:
         enrollment_end = TRIAL_END - timedelta(days=150)
         enrollment_date = self._random_date(TRIAL_START, enrollment_end)
         treatment_start = enrollment_date + timedelta(days=self._base_delay(stage, protocol))
+        # Build base record + realistic clinical noise fields
+        # Noise columns are genuine EHR data that real auditors must filter through.
+        # They cause context dilution in LLMs — the attention mechanism degrades
+        # when processing 720 records × 25+ fields of medical data.
+        comorbidity = self.rng.choices([0, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6], k=1)[0]
         return {
             "patient_id": pid,
             "age": age,
@@ -266,6 +292,21 @@ class DatasetGenerator:
             "drug": self.rng.choice(DRUGS_TREATMENT) if group == "treatment" else "Placebo",
             "enrollment_date": enrollment_date.strftime("%Y-%m-%d"),
             "country": country,
+            # ── Clinical noise columns (realistic EHR data) ──
+            "comorbidity_index": comorbidity,
+            "ecog_performance_status": self.rng.choices([0, 0, 1, 1, 1, 2, 2, 3, 4], k=1)[0],
+            "prior_chemo_cycles": self.rng.choices([0, 0, 0, 0, 1, 2, 3, 4, 6, 8], k=1)[0],
+            "baseline_ldh": round(self.rng.gauss(210, 60), 1),
+            "bmi": round(max(14.0, self.rng.gauss(26, 5)), 1),
+            "insurance_type": self.rng.choice(INSURANCE_TYPES),
+            "smoking_status": self.rng.choice(SMOKING_STATUS),
+            "blood_pressure_sys": self.rng.randint(95, 175),
+            "blood_pressure_dia": self.rng.randint(55, 105),
+            "primary_tumor_site": self.rng.choice(PRIMARY_SITES),
+            "histology_type": self.rng.choice(HISTOLOGY_TYPES),
+            "concomitant_medications": self.rng.sample(
+                CONCOMITANT_DRUGS, k=min(len(CONCOMITANT_DRUGS), self.rng.randint(0, 4))
+            ),
         }
 
     def _mortality_rate(self, patient: dict, protocol: dict) -> float:
@@ -301,11 +342,14 @@ class DatasetGenerator:
                 patient["outcome"] = "survived"
 
     def _allowed_treatment_window(self, patient: dict, protocol: dict) -> int:
-        return (
-            protocol["stage_iv_treatment_window_days"]
-            if patient.get("stage") == "IV"
-            else protocol["treatment_window_days"]
-        )
+        """Stage IV gets extended window UNLESS comorbidity exceeds threshold."""
+        comorbidity_threshold = protocol.get("comorbidity_override_threshold", 99)
+        if (
+            patient.get("stage") == "IV"
+            and patient.get("comorbidity_index", 0) <= comorbidity_threshold
+        ):
+            return protocol["stage_iv_treatment_window_days"]
+        return protocol["treatment_window_days"]
 
     def _enrollment_date(self, patient: dict) -> datetime:
         return datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
@@ -368,6 +412,56 @@ class DatasetGenerator:
                 death_date = datetime.strptime(patient["death_date"], "%Y-%m-%d")
                 treatment_start = self._treatment_date(patient)
                 if death_date <= treatment_start:
+                    self._set_deceased(patient, min_days=20, max_days=320)
+            self._mark_error(patient["patient_id"], "protocol_window_violation")
+
+        return patients
+
+    def _inject_comorbidity_override_errors(
+        self,
+        patients: list[dict],
+        protocol: dict,
+        n_errors: int,
+    ) -> list[dict]:
+        """Inject Stage IV patients whose comorbidity negates the extended window.
+
+        These patients LOOK valid under the Stage IV exception but AREN'T,
+        because their high comorbidity_index means they must use the standard
+        treatment window. This is a multi-hop reasoning trap:
+            1. Check stage → IV → think extended window applies
+            2. Check comorbidity_index → > threshold → exception revoked
+            3. Re-check delay against standard window → VIOLATION
+        LLMs almost always fail at step 2.
+        """
+        threshold = protocol.get("comorbidity_override_threshold", 99)
+        if threshold >= 99:
+            return patients
+
+        standard_window = protocol["treatment_window_days"]
+        stage_iv_window = protocol["stage_iv_treatment_window_days"]
+        if stage_iv_window <= standard_window:
+            return patients
+
+        candidates = [
+            p for p in patients
+            if p["patient_id"] not in self._ground_truth
+            and p["patient_id"] not in self._traps
+            and p["stage"] == "IV"
+        ]
+        self.rng.shuffle(candidates)
+
+        for patient in candidates[:n_errors]:
+            # Force high comorbidity (above threshold → exception revoked)
+            patient["comorbidity_index"] = self.rng.randint(threshold + 1, 6)
+            # Set delay between standard and stage_iv windows (the trap zone)
+            gap = stage_iv_window - standard_window
+            delay = standard_window + self.rng.randint(1, max(1, gap - 1))
+            enrollment = self._enrollment_date(patient)
+            patient["treatment_start"] = (enrollment + timedelta(days=delay)).strftime("%Y-%m-%d")
+            # Fix death date if it now precedes treatment
+            if patient["death_date"]:
+                death_date = datetime.strptime(patient["death_date"], "%Y-%m-%d")
+                if death_date <= self._treatment_date(patient):
                     self._set_deceased(patient, min_days=20, max_days=320)
             self._mark_error(patient["patient_id"], "protocol_window_violation")
 
@@ -567,6 +661,11 @@ class DatasetGenerator:
                 self._inject_selection_bias(patients, protocol)
             else:
                 self._inject_confounder_cohort(patients, protocol)
+            # Comorbidity override errors — multi-hop reasoning trap
+            if config.get("comorbidity_override_count", 0) > 0:
+                patients = self._inject_comorbidity_override_errors(
+                    patients, protocol, config["comorbidity_override_count"]
+                )
 
         patients = self._inject_boundary_traps(patients, protocol, config["num_boundary_traps"])
         if config["num_temporal_traps"] > 0:
@@ -662,13 +761,16 @@ if __name__ == "__main__":
                 elif error == "protocol_window_violation":
                     enrollment = datetime.strptime(patient["enrollment_date"], "%Y-%m-%d")
                     treatment_start = datetime.strptime(patient["treatment_start"], "%Y-%m-%d")
-                    allowed = (
-                        protocol["stage_iv_treatment_window_days"]
-                        if patient["stage"] == "IV"
-                        else protocol["treatment_window_days"]
-                    )
+                    comorbidity = patient.get("comorbidity_index", 0)
+                    comorbidity_threshold = protocol.get("comorbidity_override_threshold", 99)
+                    if patient["stage"] == "IV" and comorbidity <= comorbidity_threshold:
+                        allowed = protocol["stage_iv_treatment_window_days"]
+                    else:
+                        allowed = protocol["treatment_window_days"]
                     assert (treatment_start - enrollment).days > allowed, (
-                        f"Ground truth says {patient_id} window error but delay is valid"
+                        f"Ground truth says {patient_id} window error but delay is valid "
+                        f"(delay={(treatment_start - enrollment).days}, allowed={allowed}, "
+                        f"stage={patient['stage']}, comorbidity={comorbidity})"
                     )
         print("    ✓ Ground truth integrity verified")
 
