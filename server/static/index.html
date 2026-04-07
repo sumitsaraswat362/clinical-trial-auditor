@@ -498,7 +498,7 @@ The agent must READ these rules — not assume defaults.</div>
         <div class="bar-row">
           <div class="bar-label">ReAct LLM</div>
           <div class="bar-track"><div class="bar-fill full" id="bar-full"></div></div>
-          <div class="bar-val score-mid" id="bar-full-val">0.66</div>
+          <div class="bar-val score-mid" id="bar-full-val">0.50</div>
         </div>
       </div>
 
@@ -522,8 +522,8 @@ The agent must READ these rules — not assume defaults.</div>
             </tr>
             <tr>
               <td>ReAct 405B</td>
-              <td class="score-mid" id="td-react-easy">0.98</td><td class="score-low" id="td-react-med">0.60</td>
-              <td class="score-low" id="td-react-hard">0.40</td><td class="score-mid" id="td-react-avg">0.66</td>
+              <td class="score-mid" id="td-react-easy">0.77</td><td class="score-low" id="td-react-med">0.38</td>
+              <td class="score-low" id="td-react-hard">0.34</td><td class="score-mid" id="td-react-avg">0.50</td>
             </tr>
           </tbody>
         </table>
@@ -552,7 +552,7 @@ The agent must READ these rules — not assume defaults.</div>
 // ═══════════════════════════════════════════════════════════════
 
 const BASE = window.location.origin;
-const AGENTS = {naive:'Naive LLM',heuristic:'Heuristic',full:'ReAct LLM (3.3 70B)'};
+const AGENTS = {naive:'Naive LLM',heuristic:'Heuristic',full:'ReAct LLM (405B)'};
 const TASKS = {
   task_easy:{name:'Dynamic Eligibility Screening',difficulty:'easy'},
   task_medium:{name:'Protocol Timeline Audit',difficulty:'medium'},
