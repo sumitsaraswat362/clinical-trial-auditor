@@ -155,8 +155,14 @@ class MetricsTracker:
 # ═══════════════════════════════════════════════════════════════
 
 class EnvLoggerWrapper:
+    """Wrapper that emits [START]/[STEP]/[END] structured output for Meta's validation bot."""
+
     def __init__(self, env):
         self.env = env
+        self._task_id = ""
+        self._step_count = 0
+        self._score = 0.0
+        self._last_reward = 0.0
 
     def __enter__(self):
         if hasattr(self.env, "__enter__"):
@@ -164,18 +170,46 @@ class EnvLoggerWrapper:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        print("END")
+        # Emit END block with exact format Meta expects
+        print(f"[END] task={self._task_id} score={self._score:.2f} steps={self._step_count}", flush=True)
         if hasattr(self.env, "__exit__"):
             return self.env.__exit__(exc_type, exc, tb)
         return False
 
     def reset(self, **kwargs):
-        print("START")
+        # Extract task_id and reset counters
+        self._task_id = kwargs.get("task_id", "unknown")
+        self._step_count = 0
+        self._score = 0.0
+        self._last_reward = 0.0
+        # Emit START block
+        print(f"[START] task={self._task_id}", flush=True)
         return self.env.reset(**kwargs)
 
     def step(self, action):
-        print("STEP")
-        return self.env.step(action)
+        result = self.env.step(action)
+        self._step_count += 1
+
+        # Safely extract reward and score from the observation
+        try:
+            if hasattr(result, 'reward'):
+                self._last_reward = float(result.reward or 0.0)
+            if hasattr(result, 'observation'):
+                obs = result.observation
+                if hasattr(obs, 'model_dump'):
+                    obs_dict = obs.model_dump()
+                elif isinstance(obs, dict):
+                    obs_dict = obs
+                else:
+                    obs_dict = {}
+                self._score = float(obs_dict.get("score_so_far", self._score))
+        except Exception:
+            pass  # Never crash on logging
+
+        # Emit STEP block
+        print(f"[STEP] step={self._step_count} reward={self._last_reward:.2f}", flush=True)
+        return result
+
 
 class InProcessEnvSession:
     def __init__(self):
