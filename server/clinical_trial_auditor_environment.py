@@ -280,7 +280,7 @@ class ClinicalTrialAuditorEnvironment(Environment):
             "workflow": round(workflow, 3),
             "efficiency": round(efficiency, 3),
             "report": round(report, 3),
-            "benchmark_score": round(min(1.0, max(0.0, score)), 3),
+            "benchmark_score": round(min(0.99, max(0.01, score)), 3),
         }
 
     def _sync_state(self) -> None:
@@ -368,7 +368,7 @@ class ClinicalTrialAuditorEnvironment(Environment):
                 f"Audit started for {self._protocol_title}. Read the protocol excerpt first, "
                 "then investigate the required variables before flagging issues."
             ),
-            score_so_far=0.0,
+            score_so_far=0.01,
             dense_reward_total=0.0,
             score_breakdown=self._build_breakdown(),
             attempts_remaining=self._max_steps,
@@ -390,7 +390,7 @@ class ClinicalTrialAuditorEnvironment(Environment):
                 patterns_investigated=[],
                 distributions_computed=[],
                 feedback="No active episode.",
-                score_so_far=0.0,
+                score_so_far=0.01,
                 dense_reward_total=0.0,
                 score_breakdown={},
                 attempts_remaining=0,
@@ -443,7 +443,7 @@ class ClinicalTrialAuditorEnvironment(Environment):
             patterns_investigated=sorted(self._patterns_investigated),
             distributions_computed=sorted(self._distributions_computed),
             feedback=feedback,
-            score_so_far=self._state.current_score,
+            score_so_far=min(0.99, max(0.01, self._state.current_score)),
             dense_reward_total=self._state.dense_reward_total,
             score_breakdown=self._state.score_breakdown,
             attempts_remaining=max(0, self._max_steps - self._attempts),
